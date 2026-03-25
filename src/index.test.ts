@@ -4,7 +4,7 @@ import {
   filterCommands,
   detectHook,
   extractEnvFromResponse,
-} from "../src/index";
+} from "./index";
 
 // --- parseStrideMd tests ---
 
