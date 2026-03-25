@@ -137,21 +137,29 @@ Agents are invoked via `@mention` in chat (e.g., `@task-explorer`) or automatica
 
 ## Hook Execution
 
-### Automatic (with plugin installed)
+The plugin provides automatic hook execution — a native TypeScript implementation that intercepts Stride API calls and runs `.stride.md` commands without any external shell scripts or configuration files.
 
-When the opencode-stride npm plugin is installed, hooks execute automatically:
+### How It Works
 
-- **Claim API call** → `tool.execute.after` fires → runs `before_doing` from `.stride.md`
-- **Complete API call** → `tool.execute.before` fires → runs `after_doing` (blocks on failure) → then `tool.execute.after` fires → runs `before_review`
-- **Mark reviewed API call** → `tool.execute.after` fires → runs `after_review`
+The plugin subscribes to OpenCode's `tool.execute.before` and `tool.execute.after` events. When an agent makes a Stride API call via `curl` or any shell command, the plugin:
 
-Agents should make API calls directly — the plugin handles hook execution transparently.
+1. Detects the Stride API endpoint in the command
+2. Routes to the correct `.stride.md` section based on the endpoint and event timing
+3. Executes each command from the section sequentially
+4. Blocks the API call on failure (for pre-execution hooks) or logs warnings (for post-execution hooks)
 
-### Manual (without plugin)
+### Hook Routing
 
-Read `.stride.md` and execute each hook command line by line. Hooks are pre-authorized by the user who authored them — no confirmation needed.
+| API Call | Event | Hook Executed |
+|----------|-------|---------------|
+| `POST /api/tasks/claim` | `tool.execute.after` | `before_doing` |
+| `PATCH /api/tasks/:id/complete` | `tool.execute.before` | `after_doing` (blocks on failure) |
+| `PATCH /api/tasks/:id/complete` | `tool.execute.after` | `before_review` |
+| `PATCH /api/tasks/:id/mark_reviewed` | `tool.execute.after` | `after_review` |
 
-## Hook Lifecycle
+Non-Stride commands pass through without any intervention.
+
+### Hook Lifecycle
 
 | Hook | When | Blocking | Timeout |
 |------|------|----------|---------|
@@ -159,6 +167,43 @@ Read `.stride.md` and execute each hook command line by line. Hooks are pre-auth
 | `after_doing` | Before marking complete | Yes | 120s |
 | `before_review` | After marking complete | Yes | 60s |
 | `after_review` | After review approval | Yes | 60s |
+
+**Blocking hooks** prevent the API call from proceeding if any command fails. The agent receives a structured error with the failed command, exit code, and output.
+
+### `.stride.md` Format
+
+Each hook section is a `## heading` followed by a ````bash` code block:
+
+```markdown
+## before_doing
+
+`​``bash
+git pull origin main
+mix deps.get
+`​``
+```
+
+**Parser rules:**
+- Only the first ````bash` block per section is executed
+- Lines starting with `#` are treated as comments and skipped
+- Blank lines are skipped
+- Commands execute one at a time, stopping on first failure
+- Both LF and CRLF line endings are supported
+- Sections you don't need can be omitted entirely
+
+### Advantages Over Shell-Based Hooks
+
+Unlike shell-script hooks used on other platforms, the OpenCode plugin approach offers:
+
+- **Cross-platform** — runs on macOS, Linux, and Windows without separate `.sh` and `.ps1` scripts
+- **Native JSON** — parses API responses directly without `jq` dependency
+- **Single file** — no external hook scripts, configuration files, or shell wrappers
+- **Structured errors** — returns typed error objects instead of parsing stderr text
+- **Environment caching** — automatically extracts task metadata from claim responses and makes it available as environment variables (`$TASK_ID`, `$TASK_IDENTIFIER`, `$TASK_TITLE`, etc.) in subsequent hooks
+
+### Manual Hook Execution (Without Plugin)
+
+If the npm plugin is not installed, agents can execute hooks manually by reading `.stride.md` and running each command line by line. Hooks are pre-authorized by the user who authored them — no confirmation prompts needed.
 
 ## API Authorization
 
@@ -177,6 +222,38 @@ When skills reference tool names from other platforms, use OpenCode equivalents:
 | `Edit` / `replace` | `edit` |
 | `Write` / `write_file` | `write` |
 | `Agent` | `@agent-name` (subagent mention) |
+
+## Troubleshooting
+
+### Hooks not firing
+
+- Verify the plugin is listed in `opencode.json`: `"plugin": ["opencode-stride"]`
+- Confirm `.stride.md` exists in the project root
+- Check that the hook section has a ````bash` code block (not just text)
+
+### Hook command fails
+
+- The plugin executes commands sequentially and stops on first failure
+- Check the error output for the specific command that failed
+- Fix the issue and retry the API call — the hooks will fire again automatically
+
+### Missing environment variables in hooks
+
+- Environment variables (`$TASK_ID`, `$TASK_TITLE`, etc.) are extracted from the claim API response
+- They are only available after a successful claim in the same session
+- If variables are missing, the claim response may not have included the expected fields
+
+### Skills not discovered
+
+- For npm installation: verify `opencode.json` has the plugin listed
+- For local installation: verify skills are in `.opencode/skills/<name>/SKILL.md`
+- Skill names must be lowercase alphanumeric with hyphens, matching their directory name
+
+### Agents not available
+
+- For npm installation: agents are loaded from the plugin's `agents/` directory automatically
+- For local installation: copy agent files to `.opencode/agents/<name>.md`
+- Invoke agents via `@agent-name` in chat
 
 ## License
 
