@@ -18,6 +18,9 @@
     "type": "git",
     "url": "https://github.com/cheezy/stride-opencode.git"
   },
+  "bugs": {
+    "url": "https://github.com/cheezy/stride-opencode/issues"
+  },
   "license": "MIT",
   "keywords": [
     "stride",
