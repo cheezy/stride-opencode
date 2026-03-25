@@ -1,12 +1,14 @@
 import type { Plugin } from "@opencode-ai/plugin";
+import { parseStrideMd, buildCommandList, type HookName } from "./parser";
+
+// Re-export parser functions for backwards compatibility
+export { parseStrideMd, buildCommandList, buildCommandList as filterCommands, type HookName } from "./parser";
 
 // --- Stride API call detection ---
 
 const CLAIM_PATTERN = /\/api\/tasks\/claim/;
 const COMPLETE_PATTERN = /\/api\/tasks\/[^/]+\/complete/;
 const MARK_REVIEWED_PATTERN = /\/api\/tasks\/[^/]+\/mark_reviewed/;
-
-type HookName = "before_doing" | "after_doing" | "before_review" | "after_review";
 
 interface HookResult {
   hook: HookName;
@@ -23,48 +25,6 @@ interface HookResult {
 
 interface EnvCache {
   [key: string]: string;
-}
-
-// --- .stride.md parser ---
-
-export function parseStrideMd(content: string, hookName: HookName): string[] {
-  const lines = content.replace(/\r\n/g, "\n").split("\n");
-  let found = false;
-  let capture = false;
-  const commands: string[] = [];
-
-  for (const line of lines) {
-    if (line.startsWith("## ")) {
-      if (found) break;
-      const section = line.slice(3).trim();
-      if (section === hookName) {
-        found = true;
-      }
-      continue;
-    }
-
-    if (found) {
-      if (line.startsWith("```bash")) {
-        capture = true;
-        continue;
-      }
-      if (line.startsWith("```")) {
-        if (capture) break;
-        continue;
-      }
-      if (capture) {
-        commands.push(line);
-      }
-    }
-  }
-
-  return filterCommands(commands);
-}
-
-export function filterCommands(lines: string[]): string[] {
-  return lines
-    .map((line) => line.trim())
-    .filter((line) => line.length > 0 && !line.startsWith("#"));
 }
 
 // --- Stride API call routing ---
