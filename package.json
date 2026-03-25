@@ -2,7 +2,13 @@
   "name": "opencode-stride",
   "version": "1.0.0",
   "description": "Stride task lifecycle skills and agents for OpenCode: claiming, completing, creating tasks and goals",
-  "main": "index.js",
+  "main": "src/index.ts",
+  "module": "src/index.ts",
+  "type": "module",
+  "scripts": {
+    "test": "bun test",
+    "typecheck": "tsc --noEmit"
+  },
   "author": {
     "name": "Jeff Morgan",
     "email": "cheezy@letstango.ca"
@@ -22,8 +28,13 @@
     "opencode",
     "opencode-plugin"
   ],
+  "devDependencies": {
+    "@opencode-ai/plugin": "latest",
+    "@types/bun": "latest",
+    "typescript": "latest"
+  },
   "files": [
-    "index.js",
+    "src/",
     "skills/",
     "agents/",
     "AGENTS.md"
