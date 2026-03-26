@@ -6,17 +6,27 @@ This is the OpenCode version of the Stride plugin. It provides workflow enforcem
 
 ## Installation
 
-### Via npm (recommended)
+### Via GitHub (recommended)
 
 Add the plugin to your project's `opencode.json`:
+
+```json
+{
+  "plugin": ["github:cheezy/stride-opencode"]
+}
+```
+
+OpenCode installs plugins automatically using Bun at startup.
+
+### Via npm
+
+If the package is published to npm, you can also use:
 
 ```json
 {
   "plugin": ["opencode-stride"]
 }
 ```
-
-OpenCode installs npm plugins automatically using Bun at startup.
 
 ### Via local directory
 
