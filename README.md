@@ -103,7 +103,13 @@ Every Stride skill is **mandatory** — not optional. Each skill contains requir
 
 ### Workflow Order
 
-When working on tasks, skills must be activated in this order:
+**Recommended:** Use the single orchestrator skill for the complete lifecycle:
+
+```
+stride-workflow                  ← Activate ONCE — handles claim → explore → implement → review → complete
+```
+
+**Standalone mode** (when you need individual skills):
 
 ```
 stride-claiming-tasks            ← BEFORE calling GET /api/tasks/next or POST /api/tasks/claim
@@ -127,6 +133,7 @@ stride-enriching-tasks           ← WHEN a task has empty key_files/testing_str
 
 | Skill | Trigger | Purpose |
 |-------|---------|---------|
+| `stride-workflow` | Starting task work | **RECOMMENDED** — Single orchestrator for the full lifecycle |
 | `stride-claiming-tasks` | `GET /api/tasks/next` or `POST /api/tasks/claim` | Claim tasks with proper hook execution and before_doing result |
 | `stride-completing-tasks` | `PATCH /api/tasks/:id/complete` | Complete tasks with after_doing/before_review hooks and all required fields |
 | `stride-creating-tasks` | `POST /api/tasks` (work/defect) | Create tasks with correct field formats (object arrays, not strings) |
