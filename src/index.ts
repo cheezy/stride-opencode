@@ -49,16 +49,38 @@ export function extractEnvFromResponse(responseText: string): EnvCache {
   const env: EnvCache = {};
   try {
     const parsed = JSON.parse(responseText);
-    const data = parsed.data || parsed;
+
+    // tool_response may arrive in three shapes depending on the host:
+    //   1. {"stdout": "<api-json-string>", ...} — Bash-tool wrapper shape used
+    //      by some hosts (Claude Code). Peel the .stdout layer and parse.
+    //   2. {"data": {...}}                      — raw wrapped API response
+    //   3. {"id": ...}                          — raw unwrapped API response
+    let data: Record<string, unknown> | undefined;
+
+    if (parsed && typeof parsed === "object" && typeof parsed.stdout === "string") {
+      try {
+        const inner = JSON.parse(parsed.stdout);
+        data = (inner && inner.data) || inner;
+      } catch {
+        // .stdout not JSON — fall through to shapes 2/3
+      }
+    }
+
+    if (!data) {
+      data = parsed.data || parsed;
+    }
+
+    if (!data || typeof data !== "object") return env;
+
     if (data.id) env.TASK_ID = String(data.id);
-    if (data.identifier) env.TASK_IDENTIFIER = data.identifier;
-    if (data.title) env.TASK_TITLE = data.title;
-    if (data.status) env.TASK_STATUS = data.status;
-    if (data.complexity) env.TASK_COMPLEXITY = data.complexity;
-    if (data.priority) env.TASK_PRIORITY = data.priority;
+    if (data.identifier) env.TASK_IDENTIFIER = data.identifier as string;
+    if (data.title) env.TASK_TITLE = data.title as string;
+    if (data.status) env.TASK_STATUS = data.status as string;
+    if (data.complexity) env.TASK_COMPLEXITY = data.complexity as string;
+    if (data.priority) env.TASK_PRIORITY = data.priority as string;
     if (data.needs_review !== undefined)
       env.TASK_NEEDS_REVIEW = String(data.needs_review);
-    if (data.description) env.TASK_DESCRIPTION = data.description;
+    if (data.description) env.TASK_DESCRIPTION = data.description as string;
   } catch {
     // Response not JSON — skip env extraction
   }

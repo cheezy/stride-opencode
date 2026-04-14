@@ -289,4 +289,38 @@ describe("extractEnvFromResponse", () => {
     expect(env.TASK_ID).toBe("1");
     expect(env.TASK_IDENTIFIER).toBeUndefined();
   });
+
+  it("extracts from host wrapper with .stdout (Bash tool shape)", () => {
+    // Some hosts (e.g. Claude Code's Bash tool) wrap the API response as
+    // {"stdout":"<api-json-string>","stderr":"...",...}. The API JSON we
+    // want lives inside .stdout as a string and must be parsed again.
+    const response = JSON.stringify({
+      stdout: JSON.stringify({
+        data: {
+          id: 1526,
+          identifier: "W217",
+          title: "Wrapped Task",
+          status: "in_progress",
+          complexity: "medium",
+          priority: "high",
+        },
+      }),
+      stderr: "",
+      interrupted: false,
+    });
+    const env = extractEnvFromResponse(response);
+    expect(env.TASK_ID).toBe("1526");
+    expect(env.TASK_IDENTIFIER).toBe("W217");
+    expect(env.TASK_TITLE).toBe("Wrapped Task");
+    expect(env.TASK_STATUS).toBe("in_progress");
+  });
+
+  it("extracts from host wrapper with unwrapped inner payload", () => {
+    const response = JSON.stringify({
+      stdout: JSON.stringify({ id: 7, identifier: "W7", title: "Flat" }),
+    });
+    const env = extractEnvFromResponse(response);
+    expect(env.TASK_ID).toBe("7");
+    expect(env.TASK_IDENTIFIER).toBe("W7");
+  });
 });
