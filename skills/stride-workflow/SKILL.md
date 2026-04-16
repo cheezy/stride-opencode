@@ -253,6 +253,16 @@ Call `PATCH /api/tasks/:id/complete` with ALL required fields:
     "output": "Executed by OpenCode hooks system",
     "duration_ms": 0
   },
+  "explorer_result": {
+    "dispatched": false,
+    "reason": "self_reported_exploration",
+    "summary": "Read the 3 key_files manually and identified the existing pattern to mirror"
+  },
+  "reviewer_result": {
+    "dispatched": false,
+    "reason": "self_reported_review",
+    "summary": "Self-reviewed the diff against all acceptance criteria and pitfalls; no issues found"
+  },
   "workflow_steps": [
     {"name": "explorer",       "dispatched": true,  "duration_ms": 12450},
     {"name": "planner",        "dispatched": true,  "duration_ms": 8200},
@@ -275,6 +285,8 @@ Call `PATCH /api/tasks/:id/complete` with ALL required fields:
 | `actual_files_changed` | string | Comma-separated paths (NOT an array) |
 | `after_doing_result` | object | `{exit_code, output, duration_ms}` |
 | `before_review_result` | object | `{exit_code, output, duration_ms}` |
+| `explorer_result` | object | `task-explorer` custom agent dispatch result or skip-form — see `stride-completing-tasks` for full shape and skip-reason enum |
+| `reviewer_result` | object | `task-reviewer` custom agent dispatch result or skip-form — see `stride-completing-tasks` for full shape and skip-reason enum |
 | `workflow_steps` | array | Six-entry telemetry array — see **Workflow Telemetry** section below |
 
 **Optional fields:**
@@ -368,6 +380,21 @@ A small task with 0-1 key_files that legitimately skipped exploration, planning,
 - Record entries in the order the steps occurred in the workflow (the order listed in the vocabulary table above).
 - When `dispatched: false`, the `reason` must describe **why** the step was skipped (e.g., decision matrix rule, task metadata, platform constraint) — not merely restate that it was skipped.
 - A missing `workflow_steps` array, or one with fewer than six entries, indicates an incomplete telemetry record.
+
+---
+
+## Explorer and Reviewer Result Rollout
+
+Every `/complete` payload **must** include `explorer_result` and `reviewer_result` as top-level objects. Both are pre-validated by `Kanban.Tasks.CompletionValidation` on the server. The full shape (self-reported skip vs. dispatched-custom-agent), the 40-character non-whitespace summary rule, and the five-value skip-reason enum live in the `stride-completing-tasks` skill — this orchestrator does not duplicate them.
+
+The server is rolling out hard enforcement behind a feature flag `:strict_completion_validation`:
+
+| Phase | Server behavior | Agent impact |
+|---|---|---|
+| **Grace (current)** | Missing or invalid results log a structured warning and the request succeeds | Emit the fields correctly now; the warning volume is a preview of the strict-mode rejection volume |
+| **Strict (after all 5 plugins release)** | Missing or invalid results return `422` with a `failures` list | Any agent not emitting valid fields is locked out of completion |
+
+**Why this matters for the orchestrator:** Steps 3 (explorer or manual exploration) and 6 (reviewer or self-review) already produce the summaries needed for these fields. Persist those into `explorer_result` and `reviewer_result` in the Step 8 payload. Because OpenCode typically lacks custom-agent dispatch, the skip form is the default path — submit it with a reason from the enum (usually `self_reported_exploration` / `self_reported_review` or `no_subagent_support`) and a substantive summary explaining what you did instead. See `stride-completing-tasks` for the exact shape, rejection examples, and minimum-length rule.
 
 ---
 
