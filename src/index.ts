@@ -1,8 +1,10 @@
 import type { Plugin } from "@opencode-ai/plugin";
 import { parseStrideMd, buildCommandList, type HookName } from "./parser";
+import { gateToolCall } from "./skill-gate";
 
 // Re-export parser functions for backwards compatibility
 export { parseStrideMd, buildCommandList, buildCommandList as filterCommands, type HookName } from "./parser";
+export { gateSkillActivation, gateToolCall, SKILL_ACTIVATION_TOOLS, PROTECTED_SUB_SKILLS } from "./skill-gate";
 
 // --- Stride API call detection ---
 
@@ -180,9 +182,31 @@ export const StridePlugin: Plugin = async ({
   }
 
   return {
-    "tool.execute.before": async (input) => {
+    "tool.execute.before": async (input, output) => {
+      // --- Skill-activation gate ---
+      // Block direct activation of internal Stride sub-skills unless the
+      // stride-workflow orchestrator wrote the activation marker. Non-skill
+      // tool calls and non-Stride skills fall through to the bash hook below.
+      const toolName =
+        (input as { tool?: string })?.tool ??
+        (input as { input?: { tool?: string } })?.input?.tool ??
+        "";
+      const toolArgs =
+        (output as { args?: unknown })?.args ??
+        (input as { input?: unknown })?.input ??
+        undefined;
+      if (toolName) {
+        const gateResult = gateToolCall(toolName, toolArgs, projectDir);
+        if (gateResult !== "allow") {
+          throw new Error(JSON.stringify(gateResult));
+        }
+      }
+
       // Extract command from tool input
-      const command = input?.input?.command || input?.input?.args?.[0] || "";
+      const command =
+        (input as { input?: { command?: string; args?: string[] } })?.input?.command ||
+        (input as { input?: { command?: string; args?: string[] } })?.input?.args?.[0] ||
+        "";
       if (!command) return;
 
       const hookName = detectHook("before", command);
@@ -215,7 +239,10 @@ export const StridePlugin: Plugin = async ({
     },
 
     "tool.execute.after": async (input, output) => {
-      const command = input?.input?.command || input?.input?.args?.[0] || "";
+      const command =
+        (input as { input?: { command?: string; args?: string[] } })?.input?.command ||
+        (input as { input?: { command?: string; args?: string[] } })?.input?.args?.[0] ||
+        "";
       if (!command) return;
 
       const hookName = detectHook("after", command);
@@ -226,7 +253,9 @@ export const StridePlugin: Plugin = async ({
         const responseText =
           typeof output === "string"
             ? output
-            : output?.output || output?.result || "";
+            : output?.output ||
+              (output as { result?: string })?.result ||
+              "";
         if (responseText) {
           envCache = {
             ...envCache,
