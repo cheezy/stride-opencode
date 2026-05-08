@@ -239,12 +239,6 @@ Follow:
 
 ---
 
-## Step 5: Activate Development Guidelines
-
-**Before considering implementation complete, activate the `stride-development-guidelines` skill** if it is available in your project. This ensures code quality gates are met before proceeding to review.
-
----
-
 ## Step 6: Code Review (Decision Matrix)
 
 **Check the decision matrix from Step 3.** If the task is medium+ OR has 2+ key_files, review is required.
@@ -530,10 +524,6 @@ STEP 4: Implement
   Follow patterns_to_follow, avoid pitfalls
   |
   v
-STEP 5: Development Guidelines
-  Activate stride-development-guidelines (if available)
-  |
-  v
 STEP 6: Code Review (Decision Matrix)
   Small, 0-1 key_files? --> Skip to Step 7
   Otherwise:
@@ -581,7 +571,6 @@ OPENCODE WORKFLOW:
 │     ├─ Small, 0-1 key_files → Skip to Step 4
 │     └─ Otherwise → Invoke task-explorer (or read manually), outline approach
 ├─ 4. Implement: Write code using explorer output and task metadata
-├─ 5. Dev Guidelines: Activate stride-development-guidelines (if available)
 ├─ 6. Review (check decision matrix):
 │     ├─ Small, 0-1 key_files → Skip to Step 7
 │     └─ Otherwise → Invoke task-reviewer (or self-review), fix issues
