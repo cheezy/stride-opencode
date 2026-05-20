@@ -5,6 +5,31 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.9.0] - 2026-05-20
+
+### Added
+
+- **`src/capture.ts`** — New module implementing `captureChangedFiles($, cwd, base)` per the G148/W719 contract with the Option D working-tree semantic landed under G157/W758. TypeScript port of the canonical bash `capture_changed_files()` in `stride/hooks/stride-hook.sh` v1.15.0. Uses `git diff $base` (no `..HEAD`) so committed + staged + modified-uncommitted all surface in a single pass; adds `git ls-files --others --exclude-standard` for untracked-new files synthesized via `git diff --no-index --no-color /dev/null <file>` (text → `+++ b/<path>` patch; binary → placeholder, detected via the `Binary files ... differ` sentinel). Tracked binaries are detected via the `- -` marker in `git diff --numstat`. Dedupes paths that are both committed-since-base AND further modified in the working tree (Set-based, exactly one entry per path, final working-tree diff). Truncates over-500-line diffs with the contract marker; falls back to `HEAD~1` when the base is empty or unresolvable. Returns `[]` for any degraded path and NEVER throws.
+- **`src/index.ts`** — Wired the capture into the plugin lifecycle. `tool.execute.after` for `before_doing` captures `TASK_BASE_REF` via `git rev-parse HEAD` into the in-memory `envCache` AND removes any stale `.stride-changed-files.json` from a prior task. `tool.execute.before` for `after_doing` invokes `captureChangedFiles` and writes the JSON array to `$PROJECT_DIR/.stride-changed-files.json` after the `after_doing` commands succeed (and also writes when the user's after_doing block is empty/all-commented, so /complete still sees a populated snapshot). `tool.execute.after` for `after_review` cleans up the snapshot alongside the existing `envCache` reset.
+- **`src/capture.test.ts`** — 12 new tests across 4 describe blocks: degraded paths, Option D semantic (modified-uncommitted, staged-uncommitted, untracked text, untracked binary, tracked binary, dedupe), truncation (under-MAX preserved, over-MAX truncated with marker), base-ref fallback. Full suite reports 87 passed / 0 failed (up from 75).
+- **`skills/stride-completing-tasks/SKILL.md`** — New pre-completion checklist item testing for the inline `--argjson cf` pattern with absolute `$CLAUDE_PROJECT_DIR` path. The API Request Format section is rewritten to lead with a bash/curl block that inlines the snapshot read inside `jq -n --argjson cf "$(cat \"$CLAUDE_PROJECT_DIR/.stride-changed-files.json\" 2>/dev/null || echo '[]')"`, with the JSON body shape kept below as an illustrative supplement. New `## Per-File Diff Capture (Optional)` section cites `docs/diff-contract.md` and contains both a "Why inline?" paragraph (explaining the `tool.execute.before`-on-complete trigger) and a "Working-tree semantic (v1.9.0+)" paragraph documenting the broadened capture.
+
+### Changed
+
+- **`package.json`** — Version bumped from `1.8.0` to `1.9.0` (semantic broadening; the wire shape of `changed_files` is unchanged).
+
+### Why this release
+
+Other Stride plugins ship a `hooks/stride-hook.sh` that the host CLI fires as a PreToolUse/BeforeTool handler on the completion curl — the handler writes `.stride-changed-files.json` automatically. stride-opencode is a TypeScript plugin using the `@opencode-ai/plugin` interface, so this release ports the same capture function into TypeScript and wires it into the plugin's `tool.execute.before` / `tool.execute.after` lifecycle. The wire shape, the encoding contract, and the inline-cat-in-jq read pattern in the SKILL.md are byte-identical to the other plugins; only the implementation language differs.
+
+### Backward compatibility
+
+The wire shape of `changed_files` is unchanged. Completion payloads that omit it continue to validate (the empty-array form produced by the inline `|| echo '[]'` fallback is also valid). Reviewers consuming the field now see uncommitted edits and untracked-new files inline in `/review` whereas prior versions had no capture at all.
+
+### Source
+
+Mirrors stride 1.15.0 (G157/W758) into stride-opencode. Delivered in opencode as W738. The `captureChangedFiles` TypeScript implementation is a faithful semantic port of the canonical bash `capture_changed_files()` — same `git diff $base` working-tree semantic, same untracked-new-file synthesis, same binary detection paths, same 500-line truncation rule, same `[binary file — no diff captured]` placeholder. No marketplace coordination — stride-opencode ships by tag directly.
+
 ## [1.8.0] - 2026-05-19
 
 ### Changed

@@ -1,10 +1,12 @@
 import type { Plugin } from "@opencode-ai/plugin";
 import { parseStrideMd, buildCommandList, type HookName } from "./parser";
 import { gateToolCall } from "./skill-gate";
+import { captureChangedFiles } from "./capture";
 
 // Re-export parser functions for backwards compatibility
 export { parseStrideMd, buildCommandList, buildCommandList as filterCommands, type HookName } from "./parser";
 export { gateSkillActivation, gateToolCall, SKILL_ACTIVATION_TOOLS, PROTECTED_SUB_SKILLS } from "./skill-gate";
+export { captureChangedFiles, TRUNC_MARKER, BIN_PLACEHOLDER, MAX_LINES, type ChangedFile } from "./capture";
 
 // --- Stride API call detection ---
 
@@ -98,6 +100,46 @@ export const StridePlugin: Plugin = async ({
 }) => {
   const projectDir = worktree || directory;
   let envCache: EnvCache = {};
+  const snapshotPath = `${projectDir}/.stride-changed-files.json`;
+
+  // Capture git HEAD as TASK_BASE_REF so finalize_after_doing has an anchor.
+  async function captureBaseRef(): Promise<string | undefined> {
+    try {
+      const result = await $`git rev-parse HEAD`
+        .cwd(projectDir)
+        .quiet()
+        .nothrow();
+      const rev = result.stdout.toString().trim();
+      return rev || undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  // Remove a stale .stride-changed-files.json from a prior task so the new
+  // task's after_doing capture starts from a clean slate.
+  async function clearStaleSnapshot(): Promise<void> {
+    try {
+      await Bun.file(snapshotPath).unlink();
+    } catch {
+      // File didn't exist — that's the expected path
+    }
+  }
+
+  // Write the changed-files snapshot after after_doing succeeds so the
+  // subsequent /complete curl reads it inline via cat-in-jq.
+  async function finalizeAfterDoing(): Promise<void> {
+    try {
+      const snapshot = await captureChangedFiles(
+        $,
+        projectDir,
+        envCache.TASK_BASE_REF,
+      );
+      await Bun.write(snapshotPath, JSON.stringify(snapshot, null, 2) + "\n");
+    } catch {
+      // Best-effort — never throw from the capture path
+    }
+  }
 
   async function readStrideMd(): Promise<string | null> {
     const path = `${projectDir}/.stride.md`;
@@ -216,7 +258,13 @@ export const StridePlugin: Plugin = async ({
       if (!strideMd) return;
 
       const commands = parseStrideMd(strideMd, hookName);
-      if (commands.length === 0) return;
+      // after_doing fires on PreToolUse-for-/complete; even when the user's
+      // .stride.md has no after_doing commands, we still need to write the
+      // diff snapshot so the upcoming /complete curl picks it up inline.
+      if (commands.length === 0) {
+        if (hookName === "after_doing") await finalizeAfterDoing();
+        return;
+      }
 
       const result = await executeCommands(hookName, commands);
 
@@ -235,6 +283,12 @@ export const StridePlugin: Plugin = async ({
             commands_remaining: result.commands_remaining,
           }),
         );
+      }
+
+      // Write the per-file diff snapshot after after_doing succeeds so the
+      // /complete curl can read it inline via jq --argjson cf.
+      if (hookName === "after_doing") {
+        await finalizeAfterDoing();
       }
     },
 
@@ -266,19 +320,35 @@ export const StridePlugin: Plugin = async ({
             ),
           };
         }
+        // Capture current git HEAD as TASK_BASE_REF so capture_changed_files
+        // has an anchor when after_doing runs. Best-effort — non-git
+        // projects just won't get the env var.
+        const baseRef = await captureBaseRef();
+        if (baseRef) envCache.TASK_BASE_REF = baseRef;
+        // Clear any stale changed-files snapshot from a prior task.
+        await clearStaleSnapshot();
       }
 
       const strideMd = await readStrideMd();
       if (!strideMd) return;
 
       const commands = parseStrideMd(strideMd, hookName);
-      if (commands.length === 0) return;
+      if (commands.length === 0) {
+        // Clean up env cache and snapshot after the final hook in the
+        // lifecycle even when the user's after_review block is empty.
+        if (hookName === "after_review") {
+          envCache = {};
+          await clearStaleSnapshot();
+        }
+        return;
+      }
 
       const result = await executeCommands(hookName, commands);
 
-      // Clean up env cache after the final hook in the lifecycle
+      // Clean up env cache and snapshot after the final hook in the lifecycle
       if (hookName === "after_review") {
         envCache = {};
+        await clearStaleSnapshot();
       }
 
       if (result.status === "failed") {
