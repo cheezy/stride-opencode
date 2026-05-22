@@ -4,6 +4,7 @@ import {
   filterCommands,
   detectHook,
   extractEnvFromResponse,
+  responseHasAfterGoal,
 } from "./index";
 
 // --- parseStrideMd tests ---
@@ -322,5 +323,105 @@ describe("extractEnvFromResponse", () => {
     const env = extractEnvFromResponse(response);
     expect(env.TASK_ID).toBe("7");
     expect(env.TASK_IDENTIFIER).toBe("W7");
+  });
+});
+
+// --- responseHasAfterGoal tests (W794 / mirrors W506 Group 9) ---
+
+describe("responseHasAfterGoal", () => {
+  // Build the Claude/Gemini-style Bash-tool wrapper transport shape.
+  const buildWrapped = (hooks: Array<{ name: string }>) =>
+    JSON.stringify({
+      stdout: JSON.stringify({ data: { id: 42 }, hooks }),
+    });
+
+  // Build a raw payload (no wrapper) — third transport shape.
+  const buildRaw = (hooks: Array<{ name: string }>) =>
+    JSON.stringify({ data: { id: 42 }, hooks });
+
+  it("returns true when after_goal is in the wrapped Bash-tool stdout payload", () => {
+    const input = buildWrapped([
+      { name: "before_review" },
+      { name: "after_review" },
+      { name: "after_goal" },
+    ]);
+    expect(responseHasAfterGoal(input)).toBe(true);
+  });
+
+  it("returns true when after_goal is in the raw API JSON payload", () => {
+    const input = buildRaw([{ name: "before_review" }, { name: "after_goal" }]);
+    expect(responseHasAfterGoal(input)).toBe(true);
+  });
+
+  it("returns false when after_goal is absent from the hooks array", () => {
+    const input = buildWrapped([
+      { name: "before_review" },
+      { name: "after_review" },
+    ]);
+    expect(responseHasAfterGoal(input)).toBe(false);
+  });
+
+  it("returns false when the hooks array is empty", () => {
+    const input = buildWrapped([]);
+    expect(responseHasAfterGoal(input)).toBe(false);
+  });
+
+  it("returns false when the hooks key is missing entirely", () => {
+    const input = JSON.stringify({
+      stdout: JSON.stringify({ data: { id: 42 } }),
+    });
+    expect(responseHasAfterGoal(input)).toBe(false);
+  });
+
+  it("returns false on malformed outer JSON", () => {
+    expect(responseHasAfterGoal("not json at all {{")).toBe(false);
+  });
+
+  it("returns false on malformed inner stdout JSON (falls back to outer parse)", () => {
+    // Outer parses fine; the inner .stdout string fails to parse — code
+    // should fall back to using the outer parsed object (which has no
+    // .hooks at top level), then return false cleanly.
+    const input = JSON.stringify({ stdout: "this is not json {{" });
+    expect(responseHasAfterGoal(input)).toBe(false);
+  });
+
+  it("returns false when output is null or undefined", () => {
+    expect(responseHasAfterGoal(null)).toBe(false);
+    expect(responseHasAfterGoal(undefined)).toBe(false);
+  });
+
+  it("handles object output with .output wrapping a JSON string", () => {
+    // opencode's tool.execute.after delivers `output` as an object whose
+    // .output is the response string. Detection must peel that layer.
+    const input = {
+      output: buildWrapped([{ name: "after_goal" }]),
+    };
+    expect(responseHasAfterGoal(input)).toBe(true);
+  });
+
+  it("handles object output with .result wrapping a JSON string", () => {
+    // Alternate wrap shape (.result instead of .output).
+    const input = {
+      result: buildRaw([{ name: "after_goal" }]),
+    };
+    expect(responseHasAfterGoal(input)).toBe(true);
+  });
+
+  it("handles raw object output with .hooks at top level (no wrapper)", () => {
+    // Edge case: output is the parsed payload object directly, with .hooks
+    // accessible at the top level. JSON.stringify it and parse back through
+    // the same path.
+    const input = { data: { id: 42 }, hooks: [{ name: "after_goal" }] };
+    expect(responseHasAfterGoal(input)).toBe(true);
+  });
+
+  it("ignores non-object entries in the hooks array", () => {
+    // Defensive: a hooks array containing nulls/strings shouldn't crash.
+    const input = JSON.stringify({
+      stdout: JSON.stringify({
+        hooks: [null, "after_goal", { name: "after_goal" }],
+      }),
+    });
+    expect(responseHasAfterGoal(input)).toBe(true);
   });
 });
