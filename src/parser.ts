@@ -10,7 +10,8 @@ export type HookName =
   | "before_doing"
   | "after_doing"
   | "before_review"
-  | "after_review";
+  | "after_review"
+  | "after_goal";
 
 /**
  * Parse a .stride.md file and extract commands for the given hook section.

@@ -91,6 +91,73 @@ export function extractEnvFromResponse(responseText: string): EnvCache {
   return env;
 }
 
+// --- After-goal detection ---
+
+/**
+ * Detect an `after_goal` entry in the response's `hooks` array. Mirrors
+ * stride-hook.sh:response_has_after_goal (W504). Handles the same three
+ * payload shapes as extractEnvFromResponse:
+ *   1. {"stdout": "<api-json-string>", ...} — Bash-tool wrapper
+ *   2. {"data": {...}, "hooks": [...]}      — raw wrapped API response
+ *   3. Direct payload object with .hooks at top level
+ *
+ * The `output` argument matches what opencode passes to `tool.execute.after`
+ * — either a string, an object with a `.output` or `.result` string, or a
+ * raw object payload.
+ */
+export function responseHasAfterGoal(output: unknown): boolean {
+  if (output == null) return false;
+
+  // Coerce `output` to the JSON-text view of the response payload.
+  let responseText: string | undefined;
+  if (typeof output === "string") {
+    responseText = output;
+  } else if (typeof output === "object") {
+    const wrapped =
+      (output as { output?: unknown }).output ??
+      (output as { result?: unknown }).result;
+    if (typeof wrapped === "string") {
+      responseText = wrapped;
+    } else if (wrapped != null) {
+      responseText = JSON.stringify(wrapped);
+    } else {
+      responseText = JSON.stringify(output);
+    }
+  }
+  if (!responseText) return false;
+
+  try {
+    const parsed: unknown = JSON.parse(responseText);
+
+    // Peel the Bash-tool wrapper if present
+    let payload: unknown = parsed;
+    if (
+      parsed &&
+      typeof parsed === "object" &&
+      typeof (parsed as { stdout?: unknown }).stdout === "string"
+    ) {
+      try {
+        payload = JSON.parse((parsed as { stdout: string }).stdout);
+      } catch {
+        payload = parsed;
+      }
+    }
+
+    if (!payload || typeof payload !== "object") return false;
+    const hooks = (payload as { hooks?: unknown }).hooks;
+    if (!Array.isArray(hooks)) return false;
+
+    return hooks.some(
+      (h) =>
+        h &&
+        typeof h === "object" &&
+        (h as { name?: unknown }).name === "after_goal",
+    );
+  } catch {
+    return false;
+  }
+}
+
 // --- Plugin export ---
 
 export const StridePlugin: Plugin = async ({
@@ -223,6 +290,34 @@ export const StridePlugin: Plugin = async ({
     );
   }
 
+  // Serialize a HookResult into the JSON shape stride-hook.sh emits on stdout
+  // (used by after_goal so the agent can forward {exit_code, output, duration}
+  // via PATCH /api/tasks/:goal_id/after_goal). Success and failure shapes
+  // mirror the bash version verbatim except for `duration_ms` (vs bash's
+  // `duration_seconds`) — opencode's HookResult tracks ms throughout.
+  function formatHookResultJson(result: HookResult): string {
+    if (result.status === "failed") {
+      return JSON.stringify({
+        hook: result.hook,
+        status: "failed",
+        failed_command: result.failed_command,
+        command_index: result.command_index,
+        exit_code: result.exit_code,
+        stdout: result.stdout,
+        stderr: result.stderr,
+        commands_completed: result.commands_completed,
+        commands_remaining: result.commands_remaining,
+        duration_ms: result.duration_ms,
+      });
+    }
+    return JSON.stringify({
+      hook: result.hook,
+      status: "success",
+      commands_completed: result.commands_completed,
+      duration_ms: result.duration_ms,
+    });
+  }
+
   return {
     "tool.execute.before": async (input, output) => {
       // --- Skill-activation gate ---
@@ -333,31 +428,53 @@ export const StridePlugin: Plugin = async ({
       if (!strideMd) return;
 
       const commands = parseStrideMd(strideMd, hookName);
-      if (commands.length === 0) {
-        // Clean up env cache and snapshot after the final hook in the
-        // lifecycle even when the user's after_review block is empty.
-        if (hookName === "after_review") {
-          envCache = {};
-          await clearStaleSnapshot();
+      let primarySucceeded = true;
+
+      if (commands.length > 0) {
+        const result = await executeCommands(hookName, commands);
+        if (result.status === "failed") {
+          primarySucceeded = false;
+          process.stderr.write(
+            `Stride ${hookName} hook failed: ${result.failed_command}\n`,
+          );
+          if (result.stderr) {
+            process.stderr.write(result.stderr + "\n");
+          }
         }
-        return;
       }
+      // commands.length === 0 is treated as success (primary section was an
+      // empty no-op — matches the original behavior at the pre-W793 early
+      // return for that branch).
 
-      const result = await executeCommands(hookName, commands);
-
-      // Clean up env cache and snapshot after the final hook in the lifecycle
+      // Clean up env cache and snapshot after the final hook in the lifecycle.
+      // Runs regardless of primary success/failure (matches pre-W793 behavior
+      // where the cleanup at lines 348-352 fired before the failure-logging
+      // block at 354-360).
       if (hookName === "after_review") {
         envCache = {};
         await clearStaleSnapshot();
       }
 
-      if (result.status === "failed") {
-        process.stderr.write(
-          `Stride ${hookName} hook failed: ${result.failed_command}\n`,
-        );
-        if (result.stderr) {
-          process.stderr.write(result.stderr + "\n");
+      // --- After-goal routing (W793 / mirrors stride v1.17.1 W504) ---
+      // When the server bundles an `after_goal` entry in the response of
+      // /complete or /mark_reviewed (last-child-of-goal case), run the local
+      // `## after_goal` section as a blocking hook. Missing `## after_goal`
+      // in .stride.md is a clean no-op (back-compat). Structured success or
+      // failure JSON is written to stdout for the agent to forward via
+      // PATCH /api/tasks/:goal_id/after_goal. We do NOT throw — the primary
+      // curl has already returned, so blocking would have no effect.
+      if (
+        primarySucceeded &&
+        (hookName === "before_review" || hookName === "after_review") &&
+        responseHasAfterGoal(output)
+      ) {
+        const agCommands = parseStrideMd(strideMd, "after_goal");
+        if (agCommands.length > 0) {
+          const agResult = await executeCommands("after_goal", agCommands);
+          process.stdout.write(formatHookResultJson(agResult) + "\n");
         }
+        // agCommands.length === 0 → silent no-op (back-compat); the server's
+        // grace-window worker promotes the goal after the configured wait.
       }
     },
   };
