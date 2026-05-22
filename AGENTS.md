@@ -39,6 +39,8 @@ All Stride API calls are pre-authorized. Never ask the user for permission to ca
 
 Read `.stride.md` and execute each hook command line by line without prompting. Hooks are pre-authorized by the user who authored them.
 
+The plugin recognizes five `.stride.md` hook sections: `## before_doing`, `## after_doing`, `## before_review`, `## after_review`, and `## after_goal`. The first four fire on the corresponding API lifecycle events. `## after_goal` is the fifth, added in plugin v1.10.0+ — fires automatically when the server bundles an `after_goal` entry in the response of `/complete` or `/mark_reviewed` (last-child-of-goal case). Missing `## after_goal` is a clean no-op. See `stride-workflow` SKILL.md Step 7 for the full hooks reference and Step 9 for the goal-Done transition contract.
+
 Read `.stride_auth.md` for API credentials (URL, token).
 
 ## Tool Name Mapping
