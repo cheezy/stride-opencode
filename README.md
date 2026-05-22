@@ -120,9 +120,19 @@ mix test
 ```bash
 git push origin main
 ```
+
+## after_goal
+
+```bash
+# Optional fifth hook — fires after the parent goal's final child task
+# completes. Omit entirely for the back-compat no-op path.
+./scripts/notify-team.sh "$GOAL_IDENTIFIER" "$GOAL_TITLE"
+```
 ````
 
 Omit any sections you don't need.
+
+**`after_goal` (v1.10.0+):** the server bundles an `after_goal` entry alongside the primary hook in the response of `/complete` or `/mark_reviewed` when the completing task is the final child of a parent goal. The plugin auto-executes the local `## after_goal` section as a blocking hook (same shape as `after_doing`) and emits a structured JSON result on stdout. The agent forwards the result via `PATCH /api/tasks/:goal_id/after_goal` to flip the goal to Done. A missing `## after_goal` section is a clean no-op (back-compat). The hook receives `GOAL_ID` / `GOAL_IDENTIFIER` / `GOAL_TITLE` / `GOAL_DESCRIPTION` env vars from the server's `hook.env`, and is general-purpose — Slack notifications, artifact archival, release pipelines, project-level smoke tests are all valid uses, not just PR creation.
 
 ## Skill and Agent Discovery Paths
 

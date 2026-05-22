@@ -5,6 +5,31 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.10.0] - 2026-05-22
+
+### Added
+
+- **`## after_goal` hook section** — fifth `.stride.md` hook, fires after the parent goal's final child task completes. Blocking, same single-bash-fence parsing rule as the four existing hooks. The plugin's `src/index.ts` `tool.execute.after` handler now inspects the response payload of `/complete` and `/mark_reviewed` for an `after_goal` entry and executes the local `## after_goal` section as a blocking hook when present. Missing section is a clean no-op (back-compat). Structured failure JSON surfaces on stdout for the agent to forward via `PATCH /api/tasks/:goal_id/after_goal` per the Stride server contract. Implemented as W793.
+- **`responseHasAfterGoal(output: unknown): boolean`** — new exported pure function in `src/index.ts`. Handles the three transport shapes the existing `extractEnvFromResponse` handles (string output, `.output`/`.result` peel, Bash-tool `{stdout: "<json>"}` wrapper) plus an edge case where `output` is a raw object with `.hooks` at top level. Returns `true` when the payload's `hooks` array contains an entry with `name === "after_goal"`.
+- **`GOAL_*` env vars** — `GOAL_ID`, `GOAL_IDENTIFIER`, `GOAL_TITLE`, `GOAL_DESCRIPTION` forwarded into the `## after_goal` child process environment, sourced verbatim from the server-supplied `hook.env`. `BOARD_*`, `COLUMN_*`, `AGENT_NAME`, and `HOOK_NAME` remain present across all five hooks.
+- **`skills/stride-workflow/SKILL.md`** (W795) — Step 7 (Execute Hooks) opens with a Hooks Reference table listing all five hooks (timing/blocking/timeout/purpose), followed by a Hook Environment Variables matrix (`TASK_*` vs `GOAL_*` per hook) and a Canonical Hook Examples block. Step 9 (Post-Completion Decision) gains a subsection describing the goal-Done transition triggered by `after_goal` success and the agent's `PATCH /api/tasks/:goal_id/after_goal` POST contract. Examples explicitly note the hook is general-purpose (Slack notifications, artifact archival, release pipelines, project-level smoke tests are all valid uses).
+- **`AGENTS.md`** (W795) — Hook Execution section extended to mention the five recognized sections (including `## after_goal`) with a cross-reference to SKILL.md Step 7+9.
+- **`src/index.test.ts`** (W794) — 12 new tests in a `describe("responseHasAfterGoal", ...)` block covering: wrapped Bash-tool payload, raw API JSON payload, absent after_goal, empty hooks array, missing hooks key, malformed outer JSON, malformed inner stdout JSON (falls back cleanly), null/undefined input, object output with `.output`/`.result` wrappers, raw object output with `.hooks` at top level, and defensive non-object entries in the hooks array. Suite total: 99/99 pass, 166 expect() calls.
+
+### Backward compatibility
+
+A `.stride.md` without a `## after_goal` section continues to work unchanged. The four existing hook routes produce behaviorally identical output (empirically confirmed by all 87 pre-existing tests passing unchanged after the `tool.execute.after` control-flow refactor). Older agent runtimes that don't speak the after_goal protocol — including those that don't make the PATCH POST — are covered by the server-side grace-window worker.
+
+One intentional semantic improvement: when `## after_review` is empty AND the server emits an `after_goal` entry, the after-goal block now fires (pre-v1.10.0 the empty-`after_review` early-return would have missed the after_goal payload).
+
+### Migration
+
+`bun add opencode-stride@1.10.0` (or your normal opencode plugin install flow). No `.stride.md`, `.stride_auth.md`, or `.gitignore` changes are required. To opt into the new hook, add a `## after_goal` section to `.stride.md`. The receiving Stride server must include the `PATCH /api/tasks/:id/after_goal` endpoint and the `after_goal_status` / `after_goal_result` / `after_goal_attempts` columns for agent reports to land.
+
+### Source
+
+G165 / W793 (TypeScript routing in src/index.ts), W794 (12-test responseHasAfterGoal coverage in src/index.test.ts), W795 (SKILL.md + AGENTS.md), W796 (this release). Pattern mirrors the Claude plugin's v1.17.1 release.
+
 ## [1.9.1] - 2026-05-21
 
 ### Fixed
