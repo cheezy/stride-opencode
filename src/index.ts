@@ -1,12 +1,26 @@
 import type { Plugin } from "@opencode-ai/plugin";
 import { parseStrideMd, buildCommandList, type HookName } from "./parser";
 import { gateToolCall } from "./skill-gate";
-import { captureChangedFiles } from "./capture";
+import {
+  captureChangedFiles,
+  extractApiBase,
+  extractToken,
+  putChangedFiles,
+} from "./capture";
 
 // Re-export parser functions for backwards compatibility
 export { parseStrideMd, buildCommandList, buildCommandList as filterCommands, type HookName } from "./parser";
 export { gateSkillActivation, gateToolCall, SKILL_ACTIVATION_TOOLS, PROTECTED_SUB_SKILLS } from "./skill-gate";
-export { captureChangedFiles, TRUNC_MARKER, BIN_PLACEHOLDER, MAX_LINES, type ChangedFile } from "./capture";
+export {
+  captureChangedFiles,
+  extractApiBase,
+  extractToken,
+  putChangedFiles,
+  TRUNC_MARKER,
+  BIN_PLACEHOLDER,
+  MAX_LINES,
+  type ChangedFile,
+} from "./capture";
 
 // --- Stride API call detection ---
 
@@ -193,11 +207,15 @@ export const StridePlugin: Plugin = async ({
     }
   }
 
-  // Write the changed-files snapshot after after_doing succeeds so the
-  // subsequent /complete curl reads it inline via cat-in-jq.
-  async function finalizeAfterDoing(): Promise<void> {
+  // Write the changed-files snapshot after after_doing succeeds, then
+  // fire-and-forget PUT it to the Stride server (G162 + G174). The on-disk
+  // snapshot is preserved so legacy --argjson cf consumers on older
+  // deployments still read it; the PUT carries the new wire-shape
+  // ({changed_files: [...]}) to v1.16.0+ servers.
+  async function finalizeAfterDoing(command: string): Promise<void> {
+    let snapshot: { path: string; diff: string }[] = [];
     try {
-      const snapshot = await captureChangedFiles(
+      snapshot = await captureChangedFiles(
         $,
         projectDir,
         envCache.TASK_BASE_REF,
@@ -206,6 +224,13 @@ export const StridePlugin: Plugin = async ({
     } catch {
       // Best-effort — never throw from the capture path
     }
+
+    // PUT prerequisites: TASK_ID from the claim env cache, URL + token from
+    // the intercepted /complete command. Missing any of them is a silent
+    // no-op (the on-disk snapshot remains the fallback for older servers).
+    const apiBase = extractApiBase(command);
+    const token = extractToken(command);
+    await putChangedFiles(apiBase, token, envCache.TASK_ID, snapshot);
   }
 
   async function readStrideMd(): Promise<string | null> {
@@ -357,7 +382,7 @@ export const StridePlugin: Plugin = async ({
       // .stride.md has no after_doing commands, we still need to write the
       // diff snapshot so the upcoming /complete curl picks it up inline.
       if (commands.length === 0) {
-        if (hookName === "after_doing") await finalizeAfterDoing();
+        if (hookName === "after_doing") await finalizeAfterDoing(command);
         return;
       }
 
@@ -380,10 +405,10 @@ export const StridePlugin: Plugin = async ({
         );
       }
 
-      // Write the per-file diff snapshot after after_doing succeeds so the
-      // /complete curl can read it inline via jq --argjson cf.
+      // Write the per-file diff snapshot after after_doing succeeds, and
+      // fire-and-forget PUT it to the Stride server (G162 + G174).
       if (hookName === "after_doing") {
-        await finalizeAfterDoing();
+        await finalizeAfterDoing(command);
       }
     },
 

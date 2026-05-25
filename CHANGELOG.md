@@ -5,6 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.11.0] - 2026-05-25
+
+### Critical fix
+
+- **`src/capture.ts`** and **`src/index.ts`** — `finalizeAfterDoing` now PUTs the per-file diff snapshot to Stride immediately after writing `.stride-changed-files.json` to disk, with the body wrapped as `{"changed_files": [...]}` (G162 + G174 ports from main stride 1.16.0 + 1.17.2 shipped together). URL and Bearer token are extracted from the intercepted agent completion command using the same regex shape as the bash hook — no new env vars, no `.stride_auth.md` read. The PUT uses Bun's native `fetch` inside a try/catch that swallows network and 4xx/5xx errors — `after_doing` remains blocking-but-not-fragile. Silently no-ops when any prerequisite is missing (no apiBase, no token, no `TASK_ID`). The on-disk snapshot is preserved unchanged so legacy `--argjson cf` consumers on older deployments still read it. **G162 and G174 ship together because the wrap is required for the PUT to work at all** — a bare top-level array lands at `params['_json']` under Plug.Parsers, validates as `{:ok, nil}`, and is persisted as NULL, silently clearing `changed_files`.
+
+### Added
+
+- **`src/capture.ts`** — Three new exports: `extractApiBase`, `extractToken`, and `putChangedFiles`. Regex constants `API_BASE_RE = /https?:\/\/[A-Za-z0-9._-]+(?::[0-9]+)?/` and `TOKEN_RE = /Bearer +([A-Za-z0-9._+/=-]+)/` match the bash hook's `grep -oE` shape so a /complete curl is the single source of truth for both transport layers. `putChangedFiles(apiBase, token, taskId, files)` strips trailing slashes from `apiBase`, builds `${apiBase}/api/tasks/${taskId}/changed_files`, and PUTs the wrapped body via `fetch`. All four early-return paths (null apiBase / null token / null taskId / fetch throw) degrade silently.
+- **`src/capture.test.ts`** — 17 new tests in 2 describe blocks. `extractApiBase / extractToken` (7 cases: https URL, http+port URL, empty-command nulls, missing-URL null, Bearer extraction, missing-Bearer null, allowed special characters). `putChangedFiles` (10 cases: wrapped-body PUT round-trip with method/URL/headers/wire-shape assertions, empty-snapshot wraps as `{"changed_files":[]}` not bare array, trailing-slash strip, three null-input no-ops, fetch-error swallow). Suite total: 113 pass / 0 fail (96 prior + 17 new).
+
+### Backward compatibility
+
+The wire-shape fix is fully backward-compatible at the server boundary. The on-disk `.stride-changed-files.json` snapshot is preserved unchanged so legacy `--argjson cf` consumers on older deployments still read it. Against pre-1.16.0 Stride servers without the `PUT /api/tasks/:id/changed_files` endpoint, the hook PUT 404s harmlessly (fire-and-forget) and the inline-cat pattern in `stride-completing-tasks/SKILL.md` remains the path that carries the snapshot.
+
+### Migration
+
+`bun install` your updated stride-opencode plugin. No `.stride.md`, `.stride_auth.md`, or `.gitignore` changes required. No marketplace pin update — stride-opencode is not distributed through stride-marketplace.
+
+### Source
+
+G162 (auto-PUT — implementation W846) + G174 (wrapped body — folded into W846 since shipping the PUT without the wrap is the broken state that made stride 1.17.2 a critical fix). Mirrors the stride/ 1.16.0 + 1.17.2 releases and stride-pi/extensions/hook-bridge/changed-files.ts:180-215 (canonical TypeScript reference pattern).
+
 ## [1.10.0] - 2026-05-22
 
 ### Added

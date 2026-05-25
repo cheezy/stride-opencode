@@ -5,9 +5,13 @@ import { join } from "node:path";
 import { $ } from "bun";
 import {
   captureChangedFiles,
+  extractApiBase,
+  extractToken,
+  putChangedFiles,
   TRUNC_MARKER,
   BIN_PLACEHOLDER,
   MAX_LINES,
+  type ChangedFile,
 } from "./capture";
 
 /**
@@ -218,5 +222,120 @@ describe("captureChangedFiles — base ref fallback", () => {
     } finally {
       cleanup(dir);
     }
+  });
+});
+
+describe("extractApiBase / extractToken", () => {
+  it("pulls https URL out of a /complete curl", () => {
+    const cmd = 'curl -X PATCH https://stride.example.com/api/tasks/42/complete -H "Authorization: Bearer test_token_abc123"';
+    expect(extractApiBase(cmd)).toBe("https://stride.example.com");
+  });
+
+  it("pulls http URL with port out of a curl", () => {
+    const cmd = "curl -X PATCH http://localhost:4000/api/tasks/42/complete -H 'Authorization: Bearer tok'";
+    expect(extractApiBase(cmd)).toBe("http://localhost:4000");
+  });
+
+  it("returns null on empty command", () => {
+    expect(extractApiBase("")).toBeNull();
+    expect(extractToken("")).toBeNull();
+  });
+
+  it("returns null when no URL is present", () => {
+    expect(extractApiBase("git status")).toBeNull();
+  });
+
+  it("pulls Bearer token out of an Authorization header", () => {
+    const cmd = 'curl -X PATCH https://stride.example.com/api/tasks/42/complete -H "Authorization: Bearer test_token_abc123"';
+    expect(extractToken(cmd)).toBe("test_token_abc123");
+  });
+
+  it("returns null when no Bearer token is present", () => {
+    expect(extractToken("curl https://stride.example.com/api/tasks/42/complete")).toBeNull();
+  });
+
+  it("handles tokens with allowed special characters", () => {
+    const cmd = 'curl -H "Authorization: Bearer stride_dev_abc.+/=-XYZ"';
+    expect(extractToken(cmd)).toBe("stride_dev_abc.+/=-XYZ");
+  });
+});
+
+describe("putChangedFiles", () => {
+  const originalFetch = globalThis.fetch;
+  let captured: { url: string; init: RequestInit } | null = null;
+
+  beforeEach(() => {
+    captured = null;
+    // Stub fetch with a minimal Response-like object so the helper doesn't
+    // hit the network. Casting to fetch's type to satisfy TS — this stub
+    // only needs to round-trip through the helper's try/catch.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (globalThis as any).fetch = async (url: string, init: RequestInit) => {
+      captured = { url, init };
+      return new Response("", { status: 200 });
+    };
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  it("PUTs to /api/tasks/{taskId}/changed_files with wrapped body", async () => {
+    const files: ChangedFile[] = [{ path: "foo.txt", diff: "unified patch body" }];
+    await putChangedFiles("https://stride.example.com", "test_token_abc123", "42", files);
+
+    expect(captured).not.toBeNull();
+    expect(captured!.url).toBe("https://stride.example.com/api/tasks/42/changed_files");
+    expect(captured!.init.method).toBe("PUT");
+    const headers = captured!.init.headers as Record<string, string>;
+    expect(headers.Authorization).toBe("Bearer test_token_abc123");
+    expect(headers["Content-Type"]).toBe("application/json");
+    const body = captured!.init.body as string;
+    // Wrapped body shape (G174 fix — never a bare array)
+    expect(body).toBe(JSON.stringify({ changed_files: files }));
+    const parsed = JSON.parse(body);
+    expect(parsed).toEqual({ changed_files: files });
+    expect(Array.isArray(parsed)).toBe(false);
+  });
+
+  it("wraps empty snapshot as {\"changed_files\": []} — not bare array", async () => {
+    await putChangedFiles("https://stride.example.com", "tok", "42", []);
+    expect(captured).not.toBeNull();
+    const body = captured!.init.body as string;
+    expect(body).toBe('{"changed_files":[]}');
+    expect(JSON.parse(body)).toEqual({ changed_files: [] });
+  });
+
+  it("strips trailing slash from apiBase", async () => {
+    await putChangedFiles("https://stride.example.com/", "tok", "42", []);
+    expect(captured!.url).toBe("https://stride.example.com/api/tasks/42/changed_files");
+  });
+
+  it("no-ops silently when apiBase is null", async () => {
+    await putChangedFiles(null, "tok", "42", []);
+    expect(captured).toBeNull();
+  });
+
+  it("no-ops silently when token is null", async () => {
+    await putChangedFiles("https://stride.example.com", null, "42", []);
+    expect(captured).toBeNull();
+  });
+
+  it("no-ops silently when taskId is null/undefined", async () => {
+    await putChangedFiles("https://stride.example.com", "tok", null, []);
+    expect(captured).toBeNull();
+    await putChangedFiles("https://stride.example.com", "tok", undefined, []);
+    expect(captured).toBeNull();
+  });
+
+  it("swallows fetch errors (fire-and-forget) — does not throw", async () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (globalThis as any).fetch = async () => {
+      throw new Error("ECONNREFUSED");
+    };
+    // No throw — helper swallows the error.
+    await putChangedFiles("https://stride.example.com", "tok", "42", [
+      { path: "a.txt", diff: "" },
+    ]);
   });
 });

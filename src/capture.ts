@@ -196,3 +196,56 @@ function truncateDiff(diff: string): string {
   if (lines.length <= MAX_LINES) return diff;
   return lines.slice(0, MAX_LINES - 1).join("\n") + "\n" + TRUNC_MARKER;
 }
+
+// --- PUT helpers (G162 + G174 ports) ---
+//
+// extractApiBase and extractToken pull the Stride API URL and Bearer token
+// out of the agent's intercepted completion command — same regex shape as
+// the bash hook's grep -oE pipeline so a /complete curl is the single
+// source of truth for both. No new env vars, no .stride_auth.md read.
+const API_BASE_RE = /https?:\/\/[A-Za-z0-9._-]+(?::[0-9]+)?/;
+const TOKEN_RE = /Bearer +([A-Za-z0-9._+/=-]+)/;
+
+export function extractApiBase(command: string): string | null {
+  if (!command) return null;
+  const match = command.match(API_BASE_RE);
+  return match ? match[0] : null;
+}
+
+export function extractToken(command: string): string | null {
+  if (!command) return null;
+  const match = command.match(TOKEN_RE);
+  return match ? match[1] : null;
+}
+
+/**
+ * Fire-and-forget PUT the captured snapshot to the Stride server. Body is
+ * wrapped as `{"changed_files": [...]}` — never a bare array — because a
+ * bare top-level array lands at `params['_json']` under Plug.Parsers,
+ * validates as `{:ok, nil}`, and is persisted as NULL (G174 root cause).
+ *
+ * Returns silently on any prerequisite miss (no apiBase, no token, no
+ * taskId) so the caller never has to gate. All fetch errors are swallowed
+ * inside the try/catch — after_doing must remain blocking-but-not-fragile.
+ */
+export async function putChangedFiles(
+  apiBase: string | null,
+  token: string | null,
+  taskId: string | null | undefined,
+  files: ChangedFile[],
+): Promise<void> {
+  if (!apiBase || !token || !taskId) return;
+  const url = `${apiBase.replace(/\/+$/, "")}/api/tasks/${taskId}/changed_files`;
+  try {
+    await fetch(url, {
+      method: "PUT",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ changed_files: files }),
+    });
+  } catch {
+    // fire-and-forget — never block completion on upload failure
+  }
+}
