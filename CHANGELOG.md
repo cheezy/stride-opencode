@@ -5,6 +5,35 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.12.0] - 2026-06-05
+
+Parity update bringing the OpenCode plugin in line with canonical stride 1.18.0 → 1.20.0: the reviewer's structured `reviewer_result` schema (project checks + section verdicts, schema 1.2), verbatim structured-result persistence, the D54 `changed_files` credential-resolution fix, the two context-informed creation commands and their threading docs, and a behavior-preserving hardening pass on the TypeScript plugin.
+
+### Added
+
+- **`agents/task-reviewer.md`** (W968, W969) — Reviewer schema advanced 1.0 → **1.2**. Adds **project-level checks** (read `CODE-REVIEW.md`, evaluate each top-level bullet, `CRITICAL:` prefix → critical severity, emit `project_checks[]` with a paired `issues[]` entry for every `not_met`; mirrors stride **1.18.0**) and the per-section **`testing_strategy` / `patterns` / `pitfalls` verdict objects** (`passed | failed | not_assessed`) with the failed↔matching-category-issue consistency rule (mirrors stride **1.19.0** / D58).
+- **`skills/stride-completing-tasks/SKILL.md`** + **`skills/stride-workflow/SKILL.md`** (W970) — Document persisting the reviewer's **full structured JSON block verbatim** as `reviewer_result` (merged with the legacy summary fields), plus the Step 6 "Extracting the structured review block" extraction + field-mapping + JSON-parse-failure fallback. Mirrors stride **1.19.0** / D57. The schema stays owned by `agents/task-reviewer.md`.
+- **`commands/create-tasks.md`** + **`commands/create-goals.md`** (W973) — Two native OpenCode commands (`/create-tasks`, `/create-goals`) that load a `--dir` (alias `--context`) directory of project markdown as a read-only context bundle and route through `stride-workflow`, which dispatches the creation sub-skills (never invoked directly). Mirrors stride **1.20.0**'s `/stride:create-tasks` / `/stride:create-goals`. `commands/` added to `package.json` `files`; install path `.opencode/commands/`.
+- **`skills/stride-workflow/SKILL.md`**, **`skills/stride-creating-tasks/SKILL.md`**, **`skills/stride-creating-goals/SKILL.md`** (W972) — Context-threading docs: the "Context-Informed Creation (Command Entry Points)" section and the "Consuming Provided Context" field-mapping sections (augment-never-override; the four review_queue fields and the `"goals"` root-key / index-dependency rules stay required). Mirrors stride **1.20.0**.
+- **`agents/hook-diagnostician.md`**, **`agents/task-decomposer.md`** (W974) — Reconciliation: ported the missing "Input Detection and Parsing" section (structured-JSON-from-the-plugin vs raw-text) and the worked "Example: Goal Decomposed into Tasks".
+
+### Fixed
+
+- **`src/capture.ts`** + **`src/index.ts`** + **`src/capture.test.ts`** (W971) — **D54 `changed_files` credential resolution.** New `resolveStrideApiUrl` / `resolveStrideApiToken` read `$projectDir/.stride_auth.md` as the primary source — the production `**API Token:**` line, deliberately **not** the `**Local API Token:**` line — falling back to the intercepted-command literals, so the upload works even when the completion curl used `$STRIDE_API_URL` / `$STRIDE_API_TOKEN` shell variables. Fire-and-forget / non-fatal; the token is never logged. +7 tests (127 → 134). Mirrors stride **1.19.0** / D54.
+
+### Changed
+
+- **`src/index.ts`**, **`src/capture.ts`**, **`src/index.test.ts`** (W967) — Behavior-preserving hardening pass on the TypeScript plugin: removed the sole production `any` (typed the shell helper structurally), extracted and unit-tested the previously-duplicated `tool.execute` payload accessors (`extractCommand` / `extractToolName` / `extractToolArgs`), and tightened `extractEnvFromResponse` typing. No observable behavior change. +14 tests (113 → 127); `tsc --noEmit` clean.
+- **`skills/stride-subagent-workflow/SKILL.md`**, **`skills/stride-workflow/SKILL.md`** (W974) — Reconciliation: removed a stale `schema_version: "1.0"` reviewer-extraction example from `stride-subagent-workflow` (extraction is owned by `stride-workflow` Step 6); dropped an internal task-identifier from the after_goal hooks note and aligned its no-op wording with canonical.
+
+### Backward compatibility
+
+Additive. The reviewer's legacy summary fields (`summary`, `issues_found`, `acceptance_criteria_checked`) are preserved alongside the new structured keys; the server tolerates the structured keys and renders only what it receives. The TypeScript hardening is behavior-preserving (every existing test still passes). The D54 resolver adds `.stride_auth.md` as a *primary* credential source while keeping the command-literal extraction as a fallback, so existing completions keep uploading. No `.stride.md`, `.stride_auth.md`, or `.gitignore` changes are required; `bun install` and re-copy the skills, agents, and the new `commands/` directory into your `.opencode/` paths. No marketplace pin update — stride-opencode is not distributed through stride-marketplace.
+
+### Source
+
+G206 / W967–W975. Feature minor mirroring the canonical stride **1.18.0** (project checks), **1.19.0** (D54 changed_files credential resolution, D57 structured reviewer_result persistence, D58 section verdicts), and **1.20.0** (context-informed creation commands + threading docs) releases, plus a TypeScript hardening pass (W967) and a full accuracy reconciliation of the ported skills/agents against canonical (W974).
+
 ## [1.11.1] - 2026-05-25
 
 ### Changed

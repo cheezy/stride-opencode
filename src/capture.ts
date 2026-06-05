@@ -18,13 +18,36 @@
  * strictly as "best-effort capture" — it never throws.
  */
 /**
- * Shell helper interface — narrowed enough that we can accept either Bun's
- * global `$` (in tests) or the plugin context's `$` (in production). Both
- * support the tagged-template shell-call pattern with `.cwd()`, `.quiet()`,
- * `.nothrow()`, and a `.stdout: Buffer` result.
+ * Minimal structural view of Bun's tagged-template shell `$`.
+ *
+ * Captures only the surface this module uses — `.cwd()`/`.quiet()`/`.nothrow()`
+ * chaining and the awaited `{stdout, stderr, exitCode}` result — so that both
+ * Bun's global `$` (in tests) and the `@opencode-ai/plugin` context `$` (in
+ * production) satisfy it structurally. We deliberately avoid the SDK's
+ * `BunShell` type: it is not re-exported from `@opencode-ai/plugin`'s package
+ * root, and Bun's own `$` type carries extra static members the plugin shell
+ * lacks, so neither is assignable to the other. A minimal interface is the
+ * only type both shells share. Interpolated expressions are limited to the
+ * `string` and `string[]` forms this module actually passes (e.g. a git
+ * argument list); widening beyond that would break assignability of the two
+ * concrete `$` implementations.
  */
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-type ShellHelper = any;
+interface ShellCommandOutput {
+  readonly stdout: Buffer;
+  readonly stderr: Buffer;
+  readonly exitCode: number;
+}
+
+interface ShellCommandPromise extends Promise<ShellCommandOutput> {
+  cwd(dir: string): ShellCommandPromise;
+  quiet(): ShellCommandPromise;
+  nothrow(): ShellCommandPromise;
+}
+
+type ShellHelper = (
+  strings: TemplateStringsArray,
+  ...expressions: (string | string[])[]
+) => ShellCommandPromise;
 
 export interface ChangedFile {
   path: string;
@@ -197,12 +220,15 @@ function truncateDiff(diff: string): string {
   return lines.slice(0, MAX_LINES - 1).join("\n") + "\n" + TRUNC_MARKER;
 }
 
-// --- PUT helpers (G162 + G174 ports) ---
+// --- PUT helpers (G162 + G174 ports; D54 credential resolution) ---
 //
-// extractApiBase and extractToken pull the Stride API URL and Bearer token
-// out of the agent's intercepted completion command — same regex shape as
-// the bash hook's grep -oE pipeline so a /complete curl is the single
-// source of truth for both. No new env vars, no .stride_auth.md read.
+// extractApiBase / extractToken pull the Stride API URL and Bearer token out of
+// the agent's intercepted completion command — same regex shape as the bash
+// hook's grep -oE pipeline. resolveStrideApiUrl / resolveStrideApiToken (the
+// D54 port) prefer $projectDir/.stride_auth.md as the primary source so the
+// upload still works when the completion curl used shell variables
+// ($STRIDE_API_URL / $STRIDE_API_TOKEN), falling back to the command literals
+// for back-compat.
 const API_BASE_RE = /https?:\/\/[A-Za-z0-9._-]+(?::[0-9]+)?/;
 const TOKEN_RE = /Bearer +([A-Za-z0-9._+/=-]+)/;
 
@@ -216,6 +242,82 @@ export function extractToken(command: string): string | null {
   if (!command) return null;
   const match = command.match(TOKEN_RE);
   return match ? match[1] : null;
+}
+
+/** Filename of the Stride auth file, the primary credential source (D54). */
+export const AUTH_FILE = ".stride_auth.md";
+
+// URL pattern for the `.stride_auth.md` `**API URL:**` line — mirrors the bash
+// hook's `grep -oE 'https?://[A-Za-z0-9._:/-]+'` (host:port + path chars; stops
+// at the closing backtick, which is not in the character class).
+const AUTH_URL_RE = /https?:\/\/[A-Za-z0-9._:/-]+/;
+
+/**
+ * Read the lines of `$projectDir/.stride_auth.md`, or `null` if the file is
+ * absent or unreadable. Best-effort — never throws.
+ */
+async function readAuthFileLines(projectDir: string): Promise<string[] | null> {
+  try {
+    const file = Bun.file(`${projectDir}/${AUTH_FILE}`);
+    if (!(await file.exists())) return null;
+    return (await file.text()).split("\n");
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Resolve the Stride API base URL for the changed_files upload — D54 port of
+ * `stride-hook.sh:resolve_stride_api_url`.
+ *
+ * Primary source: the `**API URL:** \`<url>\`` line in
+ * `$projectDir/.stride_auth.md`. Falls back to a literal URL in the intercepted
+ * completion `command` when the auth file is absent or has no URL line. Returns
+ * `null` if neither yields a URL. Best-effort — never throws.
+ */
+export async function resolveStrideApiUrl(
+  projectDir: string,
+  command: string,
+): Promise<string | null> {
+  const lines = await readAuthFileLines(projectDir);
+  if (lines) {
+    for (const line of lines) {
+      if (line.includes("**API URL:**")) {
+        const match = line.match(AUTH_URL_RE);
+        if (match) return match[0];
+      }
+    }
+  }
+  return extractApiBase(command);
+}
+
+/**
+ * Resolve the Stride API bearer token for the changed_files upload — D54 port
+ * of `stride-hook.sh:resolve_stride_api_token`.
+ *
+ * Primary source: the PRODUCTION `**API Token:** \`<token>\`` line in
+ * `$projectDir/.stride_auth.md` — deliberately NOT the `**Local API Token:**`
+ * line. The literal substring `**API Token:**` does not occur within
+ * `**Local API Token:**` (no `**` immediately precedes `API` there), so a plain
+ * `includes` check discriminates exactly as the bash hook's
+ * `grep -E '\*\*API Token:\*\*'` does. Falls back to a literal `Bearer <token>`
+ * in the intercepted `command`. Returns `null` if neither yields a token. Never
+ * logs the token. Best-effort — never throws.
+ */
+export async function resolveStrideApiToken(
+  projectDir: string,
+  command: string,
+): Promise<string | null> {
+  const lines = await readAuthFileLines(projectDir);
+  if (lines) {
+    for (const line of lines) {
+      if (line.includes("**API Token:**")) {
+        const match = line.match(/`([^`]+)`/);
+        if (match) return match[1];
+      }
+    }
+  }
+  return extractToken(command);
 }
 
 /**

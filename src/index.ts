@@ -3,8 +3,8 @@ import { parseStrideMd, buildCommandList, type HookName } from "./parser";
 import { gateToolCall } from "./skill-gate";
 import {
   captureChangedFiles,
-  extractApiBase,
-  extractToken,
+  resolveStrideApiUrl,
+  resolveStrideApiToken,
   putChangedFiles,
 } from "./capture";
 
@@ -15,7 +15,10 @@ export {
   captureChangedFiles,
   extractApiBase,
   extractToken,
+  resolveStrideApiUrl,
+  resolveStrideApiToken,
   putChangedFiles,
+  AUTH_FILE,
   TRUNC_MARKER,
   BIN_PLACEHOLDER,
   MAX_LINES,
@@ -61,47 +64,86 @@ export function detectHook(
   return null;
 }
 
+// --- Tool payload extraction helpers ---
+//
+// opencode delivers the tool payload to `tool.execute.before/after` under a
+// nested `.input` object whose runtime shape differs from the SDK's declared
+// `{tool, sessionID, callID, args}` types. These helpers probe defensively and
+// treat their arguments as `unknown` so the same wiring works across hosts.
+
+/** Pull the shell command string from a tool.execute payload. */
+export function extractCommand(input: unknown): string {
+  const inner = (input as { input?: { command?: string; args?: string[] } })
+    ?.input;
+  return inner?.command || inner?.args?.[0] || "";
+}
+
+/** Pull the tool name from a tool.execute.before payload. */
+export function extractToolName(input: unknown): string {
+  return (
+    (input as { tool?: string })?.tool ??
+    (input as { input?: { tool?: string } })?.input?.tool ??
+    ""
+  );
+}
+
+/** Pull the tool arguments from a tool.execute.before input/output pair. */
+export function extractToolArgs(input: unknown, output: unknown): unknown {
+  return (
+    (output as { args?: unknown })?.args ??
+    (input as { input?: unknown })?.input ??
+    undefined
+  );
+}
+
 // --- Environment variable extraction from claim response ---
 
 export function extractEnvFromResponse(responseText: string): EnvCache {
   const env: EnvCache = {};
+  let parsed: unknown;
   try {
-    const parsed = JSON.parse(responseText);
-
-    // tool_response may arrive in three shapes depending on the host:
-    //   1. {"stdout": "<api-json-string>", ...} — Bash-tool wrapper shape used
-    //      by some hosts (Claude Code). Peel the .stdout layer and parse.
-    //   2. {"data": {...}}                      — raw wrapped API response
-    //   3. {"id": ...}                          — raw unwrapped API response
-    let data: Record<string, unknown> | undefined;
-
-    if (parsed && typeof parsed === "object" && typeof parsed.stdout === "string") {
-      try {
-        const inner = JSON.parse(parsed.stdout);
-        data = (inner && inner.data) || inner;
-      } catch {
-        // .stdout not JSON — fall through to shapes 2/3
-      }
-    }
-
-    if (!data) {
-      data = parsed.data || parsed;
-    }
-
-    if (!data || typeof data !== "object") return env;
-
-    if (data.id) env.TASK_ID = String(data.id);
-    if (data.identifier) env.TASK_IDENTIFIER = data.identifier as string;
-    if (data.title) env.TASK_TITLE = data.title as string;
-    if (data.status) env.TASK_STATUS = data.status as string;
-    if (data.complexity) env.TASK_COMPLEXITY = data.complexity as string;
-    if (data.priority) env.TASK_PRIORITY = data.priority as string;
-    if (data.needs_review !== undefined)
-      env.TASK_NEEDS_REVIEW = String(data.needs_review);
-    if (data.description) env.TASK_DESCRIPTION = data.description as string;
+    parsed = JSON.parse(responseText);
   } catch {
     // Response not JSON — skip env extraction
+    return env;
   }
+
+  if (!parsed || typeof parsed !== "object") return env;
+
+  // tool_response may arrive in three shapes depending on the host:
+  //   1. {"stdout": "<api-json-string>", ...} — Bash-tool wrapper shape used
+  //      by some hosts (Claude Code). Peel the .stdout layer and parse.
+  //   2. {"data": {...}}                      — raw wrapped API response
+  //   3. {"id": ...}                          — raw unwrapped API response
+  let data: unknown;
+
+  const outerStdout = (parsed as { stdout?: unknown }).stdout;
+  if (typeof outerStdout === "string") {
+    try {
+      const inner = JSON.parse(outerStdout) as { data?: unknown } | null;
+      data = (inner && inner.data) || inner;
+    } catch {
+      // .stdout not JSON — fall through to shapes 2/3
+    }
+  }
+
+  if (!data) {
+    data = (parsed as { data?: unknown }).data || parsed;
+  }
+
+  if (!data || typeof data !== "object") return env;
+  const rec = data as Record<string, unknown>;
+
+  if (rec.id) env.TASK_ID = String(rec.id);
+  if (rec.identifier) env.TASK_IDENTIFIER = rec.identifier as string;
+  if (rec.title) env.TASK_TITLE = rec.title as string;
+  if (rec.status) env.TASK_STATUS = rec.status as string;
+  if (rec.complexity) env.TASK_COMPLEXITY = rec.complexity as string;
+  if (rec.priority) env.TASK_PRIORITY = rec.priority as string;
+  if (rec.needs_review !== undefined)
+    env.TASK_NEEDS_REVIEW = String(rec.needs_review);
+  if (rec.description) env.TASK_DESCRIPTION = rec.description as string;
+
   return env;
 }
 
@@ -225,11 +267,13 @@ export const StridePlugin: Plugin = async ({
       // Best-effort — never throw from the capture path
     }
 
-    // PUT prerequisites: TASK_ID from the claim env cache, URL + token from
-    // the intercepted /complete command. Missing any of them is a silent
-    // no-op (the on-disk snapshot remains the fallback for older servers).
-    const apiBase = extractApiBase(command);
-    const token = extractToken(command);
+    // PUT prerequisites: TASK_ID from the claim env cache; URL + token resolved
+    // from $projectDir/.stride_auth.md (primary, D54) with the intercepted
+    // /complete command literals as the back-compat fallback. Missing any of
+    // them is a silent no-op (the on-disk snapshot remains the fallback for
+    // older servers).
+    const apiBase = await resolveStrideApiUrl(projectDir, command);
+    const token = await resolveStrideApiToken(projectDir, command);
     await putChangedFiles(apiBase, token, envCache.TASK_ID, snapshot);
   }
 
@@ -349,14 +393,8 @@ export const StridePlugin: Plugin = async ({
       // Block direct activation of internal Stride sub-skills unless the
       // stride-workflow orchestrator wrote the activation marker. Non-skill
       // tool calls and non-Stride skills fall through to the bash hook below.
-      const toolName =
-        (input as { tool?: string })?.tool ??
-        (input as { input?: { tool?: string } })?.input?.tool ??
-        "";
-      const toolArgs =
-        (output as { args?: unknown })?.args ??
-        (input as { input?: unknown })?.input ??
-        undefined;
+      const toolName = extractToolName(input);
+      const toolArgs = extractToolArgs(input, output);
       if (toolName) {
         const gateResult = gateToolCall(toolName, toolArgs, projectDir);
         if (gateResult !== "allow") {
@@ -365,10 +403,7 @@ export const StridePlugin: Plugin = async ({
       }
 
       // Extract command from tool input
-      const command =
-        (input as { input?: { command?: string; args?: string[] } })?.input?.command ||
-        (input as { input?: { command?: string; args?: string[] } })?.input?.args?.[0] ||
-        "";
+      const command = extractCommand(input);
       if (!command) return;
 
       const hookName = detectHook("before", command);
@@ -413,10 +448,7 @@ export const StridePlugin: Plugin = async ({
     },
 
     "tool.execute.after": async (input, output) => {
-      const command =
-        (input as { input?: { command?: string; args?: string[] } })?.input?.command ||
-        (input as { input?: { command?: string; args?: string[] } })?.input?.args?.[0] ||
-        "";
+      const command = extractCommand(input);
       if (!command) return;
 
       const hookName = detectHook("after", command);

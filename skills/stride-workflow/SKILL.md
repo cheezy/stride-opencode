@@ -83,6 +83,30 @@ You do NOT need to activate `stride-claiming-tasks`, `stride-subagent-workflow`,
 
 **Note:** The individual skills (`stride-claiming-tasks`, `stride-subagent-workflow`, `stride-completing-tasks`) remain available for standalone use when needed -- for example, when resuming a partially completed task or when only one phase needs to be repeated. This orchestrator is the preferred entry point for new task work.
 
+## Context-Informed Creation (Command Entry Points)
+
+Two slash commands wrap this orchestrator as sanctioned entry points for creating work from existing markdown context (for example, a requirements doc, or a directory of design notes passed with `--dir`):
+
+| Command | Dispatches | Purpose |
+|---|---|---|
+| `/stride:create-tasks` | `stride-creating-tasks` | Create work tasks / defects informed by a context bundle |
+| `/stride:create-goals` | `stride-creating-goals` | Create a goal with nested tasks informed by a context bundle |
+
+Both commands **wrap the orchestrator — they do not invoke the creation sub-skills directly.** The flow is:
+
+1. The command enumerates the markdown files named by its `--dir` argument and assembles a **read-only context bundle** (the enumerated file contents) plus a **creation intent** (what the user wants created).
+2. The command hands that bundle and intent to this orchestrator.
+3. The orchestrator writes the activation marker (Step 0) exactly as it does for any other run, then **forwards the context bundle verbatim** to the dispatched creation sub-skill (`stride-creating-tasks` or `stride-creating-goals`).
+
+**Contract:**
+
+- The context bundle is **read-only** — the creation sub-skills consume it as reference material; they never edit the source markdown.
+- The bundle is forwarded **verbatim** — the orchestrator does not summarize, truncate, or reinterpret it before dispatch.
+- The **activation marker is still mandatory.** Because the commands route through the orchestrator, Step 0 writes the marker (see [Orchestrator Activation Marker](#orchestrator-activation-marker)) so the `tool.execute.before` gate permits the `stride-creating-tasks` / `stride-creating-goals` dispatch — the same sub-skill set that gate governs. A command that skipped the marker would be blocked exactly like a direct user-prompt invocation.
+- These commands do **not** bypass or weaken the sub-skill STOP gate — they satisfy it the sanctioned way, by dispatching from inside the orchestrator.
+
+The task-field and batch-shape contracts the creation sub-skills enforce are **not** duplicated here — they live in `stride-creating-tasks` and `stride-creating-goals`.
+
 ## Automatic Hook Execution
 
 **When the opencode-stride plugin is installed, hooks execute automatically.** The `hooks.json` registers `tool.execute.before`/`tool.execute.after` hooks that intercept Stride API calls and execute the corresponding `.stride.md` commands via `stride-hook.sh`.
@@ -247,12 +271,94 @@ Follow:
 - The git diff of all your changes
 - The task's `acceptance_criteria`, `pitfalls`, `patterns_to_follow`, and `testing_strategy`
 
-The reviewer returns "Approved" or a list of issues (Critical, Important, Minor).
+The reviewer returns a human-readable prose summary followed by a fenced ```json block. The schema of that block is owned by `stride/agents/task-reviewer.md` — do not duplicate field definitions here.
 
 - **Fix all Critical issues** before proceeding
 - **Fix all Important issues** before proceeding
 - Minor issues are optional but recommended
-- **Save the reviewer's full output** -- you'll include it as `review_report` in Step 8
+- **Save the reviewer's full response (prose + JSON block)** -- you'll include it verbatim as `review_report` in Step 8
+
+#### Extracting the structured review block
+
+After the reviewer returns, extract the first fenced ```json block from its response and use it to populate `reviewer_result` in your Step 8 PATCH payload. The same `reviewer_result` map carries both the legacy summary fields (kept for backwards compatibility with older Kanban deploys) and the structured fields (the actual deliverable for downstream consumers — they live inside `reviewer_result`, never under a new top-level API key).
+
+**Extraction pattern** — extract the first ```json fence and parse it:
+
+```javascript
+// reviewerResponse is the agent's full text output
+const m = reviewerResponse.match(/```json\n([\s\S]*?)\n```/);
+const structured = JSON.parse(m[1]);  // the parsed schema
+```
+
+**Field mapping into `reviewer_result`:**
+
+- Legacy fields (always populated):
+  - `summary` ← `structured.summary`
+  - `issues_found` ← sum of `structured.issue_counts` values (sum only the recognized severity keys you receive; pass through any unknown severity keys verbatim inside the structured `issue_counts` object)
+  - `acceptance_criteria_checked` ← `structured.acceptance_criteria.length`
+  - `dispatched: true`, `duration_ms: <wall-clock ms>` (as before)
+- Structured fields (copied verbatim from the parsed JSON, but **omit any key the agent did not emit** — do not send empty placeholders):
+  - `status`, `issue_counts`, `issues`, `acceptance_criteria`, `testing_strategy`, `patterns`, `pitfalls`, `schema_version`
+
+**Worked example.** Given the reviewer response below (truncated for brevity)…
+
+````text
+Approved
+...prose summary + issue list + acceptance-criteria table...
+
+```json
+{
+  "schema_version": "1.2",
+  "summary": "Reviewed 3 acceptance criteria and 4 pitfalls against the diff; no issues found and all criteria met.",
+  "status": "approved",
+  "issue_counts": {"critical": 0, "important": 0, "minor": 0},
+  "issues": [],
+  "acceptance_criteria": [
+    {"criterion": "All task positions recalculate when a card moves columns", "status": "met", "evidence": "lib/kanban/tasks.ex:142-168"},
+    {"criterion": "Existing position-stable behavior unchanged", "status": "met", "evidence": "test/kanban/tasks_test.exs:198-240"},
+    {"criterion": "PubSub broadcast emitted exactly once per move", "status": "met", "evidence": "lib/kanban/tasks.ex:172"}
+  ],
+  "project_checks": [],
+  "testing_strategy": {"status": "passed", "note": "Move + broadcast paths covered by tests."},
+  "patterns": {"status": "passed", "note": "Mirrors the existing reorder pattern."},
+  "pitfalls": {"status": "passed", "note": "None of the 4 listed pitfalls violated."}
+}
+```
+````
+
+…the resulting `reviewer_result` value in the Step 8 PATCH payload is:
+
+```json
+"reviewer_result": {
+  "dispatched": true,
+  "duration_ms": 29560,
+  "summary": "Reviewed 3 acceptance criteria and 4 pitfalls against the diff; no issues found and all criteria met.",
+  "issues_found": 0,
+  "acceptance_criteria_checked": 3,
+  "schema_version": "1.2",
+  "status": "approved",
+  "issue_counts": {"critical": 0, "important": 0, "minor": 0},
+  "issues": [],
+  "acceptance_criteria": [
+    {"criterion": "All task positions recalculate when a card moves columns", "status": "met", "evidence": "lib/kanban/tasks.ex:142-168"},
+    {"criterion": "Existing position-stable behavior unchanged", "status": "met", "evidence": "test/kanban/tasks_test.exs:198-240"},
+    {"criterion": "PubSub broadcast emitted exactly once per move", "status": "met", "evidence": "lib/kanban/tasks.ex:172"}
+  ],
+  "project_checks": [],
+  "testing_strategy": {"status": "passed", "note": "Move + broadcast paths covered by tests."},
+  "patterns": {"status": "passed", "note": "Mirrors the existing reorder pattern."},
+  "pitfalls": {"status": "passed", "note": "None of the 4 listed pitfalls violated."}
+}
+```
+
+Legacy + structured fields coexist in the same map; the server persists `reviewer_result` as `:jsonb` and already tolerates the structured keys (strict-mode validation lands separately).
+
+**Fallback when JSON parsing fails.** If no ```json block is present, or the block does not parse, do not abort the completion. Instead:
+
+1. Fall back to substring-matching the prose summary line ("Approved" or "N issues found (X critical, Y important, Z minor)") to populate `reviewer_result.summary` and `reviewer_result.issues_found` as before this rollout.
+2. Set `acceptance_criteria_checked` from the count of criterion lines you find in the prose acceptance-criteria table, or to `0` if none can be parsed.
+3. **Omit** every structured field (`status`, `issue_counts`, `issues`, `acceptance_criteria`, `testing_strategy`, `patterns`, `pitfalls`, `schema_version`) from the PATCH payload — do not send empty placeholders. The Kanban server tolerates their absence (the ReviewReportPanel renders only what it receives).
+4. Keep `dispatched: true` and `duration_ms` as captured. The fallback path produces a degraded-but-valid completion, never a hard failure.
 
 **If custom agents are unavailable**, self-review:
 - [ ] Each line of `acceptance_criteria` -- is it met?
@@ -278,7 +384,7 @@ The five recognized `.stride.md` hook sections, in lifecycle order:
 | `## after_review` | After `PATCH /api/tasks/:id/mark_reviewed` succeeds | yes | 60s | Merge, deploy, cleanup |
 | `## after_goal` | After the parent goal's final child task completes | yes | 60s | Project-level rollups, goal-completion notifications, archival |
 
-A missing `## after_goal` section parses as a clean no-op — older `.stride.md` files keep working without modification. The plugin's `tool.execute.after` hook detects the `after_goal` entry in the response payload of `/complete` or `/mark_reviewed` and executes it automatically when present (W793).
+A missing `## after_goal` section parses as a clean no-op (`exit_code: 0`, empty output) — older `.stride.md` files that predate the section keep working without modification. The plugin's `tool.execute.after` hook detects the `after_goal` entry in the response payload of `/complete` or `/mark_reviewed` and executes it automatically when present.
 
 ### Hook Environment Variables
 

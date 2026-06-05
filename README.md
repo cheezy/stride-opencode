@@ -54,6 +54,10 @@ cp -R /tmp/stride-opencode/skills/. .opencode/skills/
 mkdir -p .opencode/agents
 cp /tmp/stride-opencode/agents/*.md .opencode/agents/
 
+# Copy the 2 native commands (/create-tasks, /create-goals)
+mkdir -p .opencode/commands
+cp /tmp/stride-opencode/commands/*.md .opencode/commands/
+
 # Copy the project-level AGENTS.md (orientation for the main agent)
 cp /tmp/stride-opencode/AGENTS.md AGENTS.md
 ```
@@ -61,9 +65,10 @@ cp /tmp/stride-opencode/AGENTS.md AGENTS.md
 For a **global** install (available to every project), mirror the same copy into `~/.config/opencode/`:
 
 ```bash
-mkdir -p ~/.config/opencode/skills ~/.config/opencode/agents
+mkdir -p ~/.config/opencode/skills ~/.config/opencode/agents ~/.config/opencode/commands
 cp -R /tmp/stride-opencode/skills/. ~/.config/opencode/skills/
 cp /tmp/stride-opencode/agents/*.md ~/.config/opencode/agents/
+cp /tmp/stride-opencode/commands/*.md ~/.config/opencode/commands/
 ```
 
 Per [OpenCode's skills docs](https://opencode.ai/docs/skills/), skills are also discovered from `.claude/skills/` and `.agents/skills/` — so a project that already uses the Claude Code stride plugin will pick these up from the same `.claude/skills/` directory without a separate copy.
@@ -211,6 +216,19 @@ Each skill's frontmatter has a `name` (1–64 chars, lowercase alphanumeric with
 
 Invoke agents via `@mention` in chat (e.g., `@task-explorer`) or automatically by the `stride-subagent-workflow` skill based on task complexity. See [OpenCode's agents docs](https://opencode.ai/docs/agents/) for the frontmatter fields supported (description, mode, model, temperature, permission).
 
+The `task-reviewer` emits a structured `reviewer_result` JSON block (**schema 1.2**) — `status`, `issue_counts`, `issues[]`, `acceptance_criteria[]`, `project_checks[]` (parsed from a project `CODE-REVIEW.md`), and the per-section `testing_strategy` / `patterns` / `pitfalls` verdicts. The orchestrator extracts that block and persists it verbatim into the completion payload (merged with the legacy summary fields) so the Stride review queue renders the full review rather than a bare issue count. The schema is owned by `agents/task-reviewer.md`.
+
+## Commands
+
+Two native OpenCode commands wrap the orchestrator as entry points for context-informed creation:
+
+| Command | Dispatches | Purpose |
+|---------|------------|---------|
+| `/create-tasks` | `stride-creating-tasks` | Create work tasks / defects, optionally informed by a `--dir` directory of project markdown |
+| `/create-goals` | `stride-creating-goals` | Create a goal with nested tasks from the same `--dir` context bundle |
+
+Both parse `$ARGUMENTS`, load the `--dir` markdown (alias `--context`) as a **read-only** context bundle (files inside `--dir` only), and route through `stride-workflow` (never the creation sub-skills directly). A `--dir` that is set but missing is a hard error; an empty `--dir` warns and continues. Install them by copying `commands/*.md` into `.opencode/commands/` (project-local) or `~/.config/opencode/commands/` (global), alongside the skills and agents.
+
 ## Hook Execution
 
 The plugin provides automatic hook execution — a native TypeScript implementation that intercepts Stride API calls and runs `.stride.md` commands without any external shell scripts or configuration files.
@@ -245,6 +263,8 @@ Non-Stride commands pass through without any intervention.
 | `after_review` | After review approval | Yes | 60s |
 
 **Blocking hooks** prevent the API call from proceeding if any command fails. The agent receives a structured error with the failed command, exit code, and output.
+
+**Per-file diff upload (`changed_files`).** After a successful `after_doing` hook, the plugin captures the per-file working-tree diff to `.stride-changed-files.json` and fire-and-forgets a `PUT /api/tasks/:id/changed_files` so the Stride review queue shows the agent's diff. The upload URL and bearer token are resolved from your project's `.stride_auth.md` (the production `**API Token:**` line — deliberately **not** the `**Local API Token:**` line), falling back to the literal URL/token in the intercepted completion command. The upload is non-fatal (a missing auth file, network error, or absent endpoint degrades silently) and never logs the token.
 
 ### `.stride.md` parser rules
 

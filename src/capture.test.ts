@@ -7,6 +7,8 @@ import {
   captureChangedFiles,
   extractApiBase,
   extractToken,
+  resolveStrideApiUrl,
+  resolveStrideApiToken,
   putChangedFiles,
   TRUNC_MARKER,
   BIN_PLACEHOLDER,
@@ -337,5 +339,109 @@ describe("putChangedFiles", () => {
     await putChangedFiles("https://stride.example.com", "tok", "42", [
       { path: "a.txt", diff: "" },
     ]);
+  });
+});
+
+describe("resolveStrideApiUrl / resolveStrideApiToken (D54)", () => {
+  const PROD_TOKEN = "stride_dev_PRODtoken123+/=";
+  const LOCAL_TOKEN = "stride_dev_LOCALtoken456";
+  const AUTH_URL = "https://www.stridelikeaboss.com";
+
+  // Mirrors the real .stride_auth.md shape: a Local line AND a production line,
+  // with the Local line listed FIRST to prove order doesn't fool resolution.
+  const fullAuth = [
+    "# Stride API Authentication",
+    "",
+    "## API Configuration",
+    "",
+    `- **API URL:** \`${AUTH_URL}\``,
+    `- **Local API Token:** \`${LOCAL_TOKEN}\``,
+    `- **API Token:** \`${PROD_TOKEN}\``,
+    "- **User Email:** `me@example.com`",
+    "",
+  ].join("\n");
+
+  function writeAuth(dir: string, body: string): void {
+    writeFileSync(join(dir, ".stride_auth.md"), body);
+  }
+
+  let dir: string;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "stride-auth-"));
+  });
+  afterEach(() => cleanup(dir));
+
+  it("resolves URL and token from .stride_auth.md as the PRIMARY source", async () => {
+    writeAuth(dir, fullAuth);
+    // The command carries DIFFERENT literals — the auth file must win.
+    const cmd =
+      "curl -X PUT https://other.example.com/api -H 'Authorization: Bearer cmd_token_zzz'";
+    expect(await resolveStrideApiUrl(dir, cmd)).toBe(AUTH_URL);
+    expect(await resolveStrideApiToken(dir, cmd)).toBe(PROD_TOKEN);
+  });
+
+  it("resolves the production **API Token:** line, NOT **Local API Token:**", async () => {
+    writeAuth(dir, fullAuth);
+    const token = await resolveStrideApiToken(dir, "");
+    expect(token).toBe(PROD_TOKEN);
+    expect(token).not.toBe(LOCAL_TOKEN);
+  });
+
+  it("never returns the Local token when ONLY the Local line is present", async () => {
+    writeAuth(dir, `- **Local API Token:** \`${LOCAL_TOKEN}\`\n`);
+    // No command fallback either → null, and crucially NOT the Local token.
+    const token = await resolveStrideApiToken(dir, "");
+    expect(token).toBeNull();
+    expect(token).not.toBe(LOCAL_TOKEN);
+  });
+
+  it("falls back to command literals when the auth file is absent", async () => {
+    const cmd =
+      'curl -X PUT https://fallback.example.com/api/tasks/9/complete -H "Authorization: Bearer fallback_tok_abc"';
+    expect(await resolveStrideApiUrl(dir, cmd)).toBe("https://fallback.example.com");
+    expect(await resolveStrideApiToken(dir, cmd)).toBe("fallback_tok_abc");
+  });
+
+  it("falls back to command literals when the auth file lacks the relevant lines", async () => {
+    writeAuth(dir, "# Stride API Authentication\n\n- **User Email:** `me@example.com`\n");
+    const cmd = "curl https://cmd.example.com -H 'Authorization: Bearer cmd_only_tok'";
+    expect(await resolveStrideApiUrl(dir, cmd)).toBe("https://cmd.example.com");
+    expect(await resolveStrideApiToken(dir, cmd)).toBe("cmd_only_tok");
+  });
+
+  it("returns null when neither the auth file nor the command yields creds", async () => {
+    expect(await resolveStrideApiUrl(dir, "")).toBeNull();
+    expect(await resolveStrideApiToken(dir, "")).toBeNull();
+  });
+
+  it("never logs the resolved token (no console/stderr leak)", async () => {
+    writeAuth(dir, fullAuth);
+    const sink: string[] = [];
+    const origLog = console.log;
+    const origErr = console.error;
+    const origWarn = console.warn;
+    const origStderr = process.stderr.write.bind(process.stderr);
+    console.log = (...a: unknown[]) => void sink.push(a.join(" "));
+    console.error = (...a: unknown[]) => void sink.push(a.join(" "));
+    console.warn = (...a: unknown[]) => void sink.push(a.join(" "));
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (process.stderr as any).write = (chunk: unknown) => {
+      sink.push(String(chunk));
+      return true;
+    };
+    try {
+      const token = await resolveStrideApiToken(
+        dir,
+        `curl -H 'Authorization: Bearer ${PROD_TOKEN}'`,
+      );
+      expect(token).toBe(PROD_TOKEN);
+    } finally {
+      console.log = origLog;
+      console.error = origErr;
+      console.warn = origWarn;
+      process.stderr.write = origStderr;
+    }
+    expect(sink.join("\n")).not.toContain(PROD_TOKEN);
+    expect(sink.join("\n")).not.toContain(LOCAL_TOKEN);
   });
 });

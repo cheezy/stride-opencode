@@ -3,6 +3,9 @@ import {
   parseStrideMd,
   filterCommands,
   detectHook,
+  extractCommand,
+  extractToolName,
+  extractToolArgs,
   extractEnvFromResponse,
   responseHasAfterGoal,
 } from "./index";
@@ -231,6 +234,91 @@ describe("detectHook", () => {
         "curl https://stride.dev/api/tasks/99/mark_reviewed",
       ),
     ).toBeNull();
+  });
+});
+
+// --- tool payload extraction helpers ---
+
+describe("extractCommand", () => {
+  it("reads the command from the nested .input shape", () => {
+    expect(extractCommand({ input: { command: "curl -X POST /claim" } })).toBe(
+      "curl -X POST /claim",
+    );
+  });
+
+  it("falls back to the first positional arg when command is absent", () => {
+    expect(extractCommand({ input: { args: ["git status", "-s"] } })).toBe(
+      "git status",
+    );
+  });
+
+  it("prefers command over args[0] when both are present", () => {
+    expect(
+      extractCommand({ input: { command: "cmd", args: ["argcmd"] } }),
+    ).toBe("cmd");
+  });
+
+  it("returns empty string for an empty command (falls through to args)", () => {
+    expect(extractCommand({ input: { command: "", args: ["fallback"] } })).toBe(
+      "fallback",
+    );
+  });
+
+  it("returns empty string when there is no command or args", () => {
+    expect(extractCommand({ input: {} })).toBe("");
+    expect(extractCommand({})).toBe("");
+    expect(extractCommand(undefined)).toBe("");
+    expect(extractCommand(null)).toBe("");
+  });
+});
+
+describe("extractToolName", () => {
+  it("reads tool from the SDK-flat shape", () => {
+    expect(extractToolName({ tool: "bash" })).toBe("bash");
+  });
+
+  it("reads tool from the nested .input shape", () => {
+    expect(extractToolName({ input: { tool: "skill" } })).toBe("skill");
+  });
+
+  it("prefers the flat tool over the nested one", () => {
+    expect(extractToolName({ tool: "flat", input: { tool: "nested" } })).toBe(
+      "flat",
+    );
+  });
+
+  it("does not fall through on an empty-string tool (?? semantics)", () => {
+    expect(extractToolName({ tool: "", input: { tool: "nested" } })).toBe("");
+  });
+
+  it("returns empty string when no tool is present", () => {
+    expect(extractToolName({})).toBe("");
+    expect(extractToolName(undefined)).toBe("");
+    expect(extractToolName(null)).toBe("");
+  });
+});
+
+describe("extractToolArgs", () => {
+  it("reads args from the output object first", () => {
+    expect(extractToolArgs({}, { args: { name: "x" } })).toEqual({ name: "x" });
+  });
+
+  it("falls back to the nested input payload when output has no args", () => {
+    expect(extractToolArgs({ input: { skill: "y" } }, {})).toEqual({
+      skill: "y",
+    });
+  });
+
+  it("prefers output.args over the nested input payload", () => {
+    expect(
+      extractToolArgs({ input: { skill: "nested" } }, { args: "fromOutput" }),
+    ).toBe("fromOutput");
+  });
+
+  it("returns undefined when neither source provides args", () => {
+    expect(extractToolArgs({}, {})).toBeUndefined();
+    expect(extractToolArgs(undefined, undefined)).toBeUndefined();
+    expect(extractToolArgs(null, null)).toBeUndefined();
   });
 });
 
