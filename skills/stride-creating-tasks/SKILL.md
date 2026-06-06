@@ -24,22 +24,24 @@ The task API requires specific field formats that are ONLY documented here:
 - `verification_steps` (MUST be array of objects with `step_type`, `step_text`, `expected_result`, `position` — NOT strings)
 - `key_files` (MUST be array of objects with `file_path`, `note`, `position` — NOT strings)
 - `testing_strategy` (MUST have `unit_tests`, `integration_tests`, `manual_tests` as arrays of strings)
+- `security_considerations` (MUST be an array of strings — the security implications to address; NOT a single string or object)
 - `type` (MUST be exactly `"work"`, `"defect"`, or `"goal"` — no other values)
 
 **Attempting to create a task from memory results in malformed fields** that cause either API 422 errors or tasks that waste 3+ hours during implementation.
 
-## ⚠️ REVIEW QUEUE SCORING — THESE FOUR FIELDS ARE FIRST-CLASS DELIVERABLES ⚠️
+## ⚠️ REVIEW QUEUE SCORING — THESE FIVE FIELDS ARE FIRST-CLASS DELIVERABLES ⚠️
 
-The **review_queue dashboard** scores every completed task on these four fields:
+The **review_queue dashboard** scores every completed task on these five fields:
 
 - `acceptance_criteria`
 - `testing_strategy`
+- `security_considerations`
 - `pitfalls`
 - `patterns_to_follow`
 
 **If you omit any of them, the review_queue renders an empty pill for that field** — and the task is flagged as under-specified to every reviewer who opens it. Empty pills are visible, public, and persistent. They do not get back-filled later.
 
-Treat these four fields the same as `title` and `type`: not optional, not "I'll add it later," not "the agent will figure it out." If a field is genuinely not applicable (e.g. a doc-only task has no `testing_strategy.unit_tests`), populate it with the specific reason — never leave it null.
+Treat these five fields the same as `title` and `type`: not optional, not "I'll add it later," not "the agent will figure it out." If a field is genuinely not applicable (e.g. a doc-only task has no `testing_strategy.unit_tests`, or a pure-styling task has no `security_considerations`), populate it with the specific reason — never leave it null.
 
 ## Overview
 
@@ -101,6 +103,7 @@ Use BEFORE calling `POST /api/tasks` to create any Stride task or defect.
 - [ ] `dependencies` - Array of task identifiers (e.g., `["W47", "W48"]`) or indices for new tasks
 - [ ] `verification_steps` - Array of objects (NOT strings!)
 - [ ] `testing_strategy` - Object with `unit_tests`, `integration_tests`, `manual_tests` as arrays
+- [ ] `security_considerations` - Array of strings (security implications to address)
 - [ ] `acceptance_criteria` - Newline-separated string
 - [ ] `patterns_to_follow` - Newline-separated string with file references
 - [ ] `pitfalls` - Array of strings (what NOT to do)
@@ -121,6 +124,11 @@ Use BEFORE calling `POST /api/tasks` to create any Stride task or defect.
 **MUST be arrays, not strings:**
 - ✅ `"unit_tests": ["Test auth flow", "Test error handling"]`
 - ❌ `"unit_tests": "Run unit tests"` (will fail)
+
+### security_considerations array
+**MUST be an array of strings, not a single string or object:**
+- ✅ `"security_considerations": ["Validate and sanitize the uploaded filename to prevent path traversal", "Authorize the requesting user owns the board before mutating"]`
+- ❌ `"security_considerations": "Validate input"` (will fail)
 
 ### verification_steps
 **MUST be array of objects:**
@@ -203,6 +211,10 @@ Use array indices since identifiers don't exist yet - see stride-creating-goals 
     ],
     "coverage_target": "100% for theme preference logic"
   },
+  "security_considerations": [
+    "Persist the theme preference scoped to the authenticated user — never trust a client-supplied user_id",
+    "Escape the theme value before interpolating it into markup/CSS to avoid injection"
+  ],
   "acceptance_criteria": "Toggle appears in settings\nDark mode applies site-wide\nPreference persists across sessions\nAll existing tests still pass",
   "patterns_to_follow": "See lib/kanban_web/live/user_live/settings.ex for preference update pattern\nFollow existing theme structure in app.css",
   "pitfalls": [
@@ -229,7 +241,7 @@ Map the context to fields:
 **Rules:**
 
 - **Context augments the user's interactive intent — it never silently overrides it.** When the bundle and the user's stated intent disagree, surface the conflict and confirm with the user; do not quietly prefer the document.
-- **Context is a source, not a substitute for the contract.** The Required Fields Checklist and the four review_queue-scored fields (`acceptance_criteria`, `testing_strategy`, `pitfalls`, `patterns_to_follow`) are **still required** on every task. Context that doesn't cover a required field does not excuse leaving it blank — fill it from the user, the codebase, or sensible defaults.
+- **Context is a source, not a substitute for the contract.** The Required Fields Checklist and the five review_queue-scored fields (`acceptance_criteria`, `testing_strategy`, `security_considerations`, `pitfalls`, `patterns_to_follow`) are **still required** on every task. Context that doesn't cover a required field does not excuse leaving it blank — fill it from the user, the codebase, or sensible defaults.
 - **The bundle is read-only.** Consume it as reference material; never edit the source markdown.
 - The orchestrator gate still applies: this skill runs only when dispatched from inside `stride-workflow` (see the **STOP — orchestrator check** at the top of this file). A populated context bundle does not change that.
 
@@ -244,10 +256,11 @@ Context-informed creation is faster and better-grounded than blind exploration �
 - "Just need title and description"
 - "I'll skip acceptance_criteria — it's obvious from the title"
 - "testing_strategy doesn't really apply to this one"
+- "security_considerations is someone else's problem — I'll leave it empty"
 - "pitfalls is just nice-to-have, I'll come back to it"
 - "patterns_to_follow can stay empty — the agent has the codebase"
 
-**All of these mean: Add comprehensive details NOW.** The last four also mean: **an empty pill on the review_queue dashboard.**
+**All of these mean: Add comprehensive details NOW.** The last five also mean: **an empty pill on the review_queue dashboard.**
 
 ## Rationalization Table
 
@@ -260,6 +273,7 @@ Context-informed creation is faster and better-grounded than blind exploration �
 | "Time pressure, need quick" | Rich task saves MORE time | Spending 5 min now saves 3 hours later |
 | "acceptance_criteria is obvious from the title" | Reviewers can't grade against a definition that doesn't exist | Empty pill on review_queue + ambiguous "done" |
 | "testing_strategy doesn't apply here" | Even doc tasks have verification (render, link-check, grep) | Empty pill on review_queue + no test gate |
+| "security_considerations doesn't apply here" | Almost every change touches input, authz, or data exposure; "none — pure styling change" is itself a valid considered answer | Empty pill on review_queue + unreviewed security risk |
 | "pitfalls is just nice-to-have" | Pitfalls is the cheapest way to prevent the wrong fix | Empty pill on review_queue + repeat mistakes |
 | "patterns_to_follow can stay empty" | Without referenced patterns, the agent invents inconsistent ones | Empty pill on review_queue + style drift |
 
@@ -403,6 +417,25 @@ Use these exact values — any other value will be rejected.
 
 **Valid keys:** `unit_tests`, `integration_tests`, `manual_tests`, `edge_cases`, `coverage_target`
 **All values** must be strings or arrays of strings.
+
+### security_considerations
+
+```json
+❌ WRONG (single string):
+"security_considerations": "Sanitize user input"
+
+❌ WRONG (object):
+"security_considerations": {"input": "Sanitize user input"}
+
+✅ RIGHT (array of strings):
+"security_considerations": [
+  "Validate and sanitize the uploaded filename to prevent path traversal",
+  "Authorize the requesting user owns the board before mutating",
+  "Parameterize the query — never interpolate the search term into raw SQL"
+]
+```
+
+**Shape:** array of strings, each naming a specific security implication the implementing agent must address (input validation, authorization boundaries, secret handling, injection surfaces, data exposure). If the change genuinely has no security surface, state that explicitly (e.g. `["None — pure CSS/styling change, no input or authz touched"]`) rather than leaving it empty.
 
 ---
 **References:** For the full field reference, see `api_schema` in the onboarding response (`GET /api/agent/onboarding`). For endpoint details, see the [API Reference](https://raw.githubusercontent.com/cheezy/kanban/refs/heads/main/docs/api/README.md).
