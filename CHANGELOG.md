@@ -5,6 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.13.0] - 2026-06-06
+
+Parity release bringing the OpenCode plugin in line with canonical stride G210, which adds `security_considerations` as the **fifth** review_queue-scored field (alongside `acceptance_criteria`, `testing_strategy`, `pitfalls`, `patterns_to_follow`). Feature minor. All five content-bearing skill/agent files now treat `security_considerations` as a first-class scored deliverable, and the reviewer emits a fifth section verdict at `schema_version` **1.3**.
+
+### Added
+
+- **`skills/stride-creating-goals/SKILL.md` + `skills/stride-creating-tasks/SKILL.md` — `security_considerations` as the 5th scored field (W1039).** Adds `security_considerations` to the review_queue-scoring banner, the required/nesting field lists, the minimum-bar list, the Red Flags, the Rationalization Table, and the example JSON in both creation skills; creating-tasks also gains the `### security_considerations` Embedded-Object-Formats subsection (array-of-strings shape + the `"None — …"` escape hatch). OpenCode port wording (frontmatter, ✅/❌ emoji labels, the "NESTED TASKS ARE NOT EXEMPT" banner heading) preserved.
+- **`skills/stride-enriching-tasks/SKILL.md` + `agents/task-enricher.md` — security pass + 17-item checklist (W1040).** Step 5 now covers security analysis (input validation, authorization boundaries, secret handling, injection surfaces, data exposure) producing `security_considerations`; the pre-submission checklist grows 16 → 17 items; `security_considerations` is added to the PATCH/output example JSON, the field-type reminders, and the Red Flags.
+- **`agents/task-decomposer.md` + `agents/task-reviewer.md` — decomposer Required field + reviewer security verdict (W1041).** task-decomposer marks `security_considerations` Required in the field table, the output template, and every worked-example task. task-reviewer adds the Step 5 "Security Considerations Alignment" review step (steps renumbered), the `security_considerations` section verdict object, the `"security"` issue category, the expanded consistency rule, and bumps the reviewer `schema_version` **1.2 → 1.3**.
+- **`skills/stride-completing-tasks/SKILL.md` + `skills/stride-workflow/SKILL.md` — persist & extract the security verdict (W1042).** The `reviewer_result` structured block in completing-tasks lists the `security_considerations` section verdict (and bumps its example to schema 1.3); stride-workflow Step 6 copies `security_considerations` verbatim in the field map and the fallback omit-list, and its worked example carries the security verdict at `schema_version` 1.3.
+
+### Changed
+
+- **Manifest/docs reflect the fifth scored field (W1043).** `AGENTS.md` and `README.md` updated to describe the reviewer's `schema_version` 1.3 block with the `security_considerations` per-section verdict and to name `security_considerations` as the fifth review_queue-scored field. Version bumped 1.12.0 → 1.13.0 in `package.json`.
+
+### Backward compatibility
+
+Documentation/contract additions only. Older completions that omit `security_considerations` (or send the thin `reviewer_result` envelope / self-reported-skip form) continue to validate — the server tolerates the absent structured key. No plugin hook routing, parser contract, env-var matrix, or `.stride.md` change is required. The version bump affects discovery metadata only. All intentional OpenCode adaptations (TypeScript plugin hook execution, self-reported-skip primary path, JavaScript extraction pattern, `read`/`grep`/`glob` tool vocabulary, `.opencode/` install destinations, AGENTS.md context file) are preserved.
+
+### Source
+
+G210 (canonical) / W1039 (creation skills), W1040 (enrichment skill + enricher agent), W1041 (decomposer + reviewer agents), W1042 (completing-tasks + workflow skills), W1043 (release). Mirrors the canonical stride G210 `security_considerations` fifth-scored-field rollout into the OpenCode variant. No marketplace pin update — stride-opencode is not distributed through stride-marketplace.
+
 ## [1.12.0] - 2026-06-05
 
 Parity update bringing the OpenCode plugin in line with canonical stride 1.18.0 → 1.20.0: the reviewer's structured `reviewer_result` schema (project checks + section verdicts, schema 1.2), verbatim structured-result persistence, the D54 `changed_files` credential-resolution fix, the two context-informed creation commands and their threading docs, and a behavior-preserving hardening pass on the TypeScript plugin.

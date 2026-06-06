@@ -216,7 +216,7 @@ Each skill's frontmatter has a `name` (1–64 chars, lowercase alphanumeric with
 
 Invoke agents via `@mention` in chat (e.g., `@task-explorer`) or automatically by the `stride-subagent-workflow` skill based on task complexity. See [OpenCode's agents docs](https://opencode.ai/docs/agents/) for the frontmatter fields supported (description, mode, model, temperature, permission).
 
-The `task-reviewer` emits a structured `reviewer_result` JSON block (**schema 1.2**) — `status`, `issue_counts`, `issues[]`, `acceptance_criteria[]`, `project_checks[]` (parsed from a project `CODE-REVIEW.md`), and the per-section `testing_strategy` / `patterns` / `pitfalls` verdicts. The orchestrator extracts that block and persists it verbatim into the completion payload (merged with the legacy summary fields) so the Stride review queue renders the full review rather than a bare issue count. The schema is owned by `agents/task-reviewer.md`.
+The `task-reviewer` emits a structured `reviewer_result` JSON block (**schema 1.3**) — `status`, `issue_counts`, `issues[]`, `acceptance_criteria[]`, `project_checks[]` (parsed from a project `CODE-REVIEW.md`), and the per-section `testing_strategy` / `patterns` / `pitfalls` / `security_considerations` verdicts — `security_considerations` is the fifth review_queue-scored field. The orchestrator extracts that block and persists it verbatim into the completion payload (merged with the legacy summary fields) so the Stride review queue renders the full review rather than a bare issue count. The schema is owned by `agents/task-reviewer.md`.
 
 ## Commands
 
