@@ -414,7 +414,7 @@ The example above shows the self-reported skip form for `explorer_result` and
 agent **was** dispatched, `reviewer_result` instead carries the reviewer agent's
 **structured JSON block** (`schema_version`, `status`, `issue_counts`,
 `issues[]`, `acceptance_criteria[]`, `project_checks[]`, and the per-section
-`testing_strategy`/`patterns`/`pitfalls` verdicts — the fields the Kanban review
+`testing_strategy`/`patterns`/`pitfalls`/`security_considerations` verdicts — the fields the Kanban review
 queue actually renders) copied verbatim, **merged** with the dispatch telemetry
 (`dispatched: true`, `duration_ms`) and the derived legacy summary fields
 (`issues_found`, `acceptance_criteria_checked`, `summary`). Do NOT send only the
@@ -558,7 +558,7 @@ Free-form reasons are rejected — the enum is the contract.
   "summary": "<40+ non-whitespace characters describing what was reviewed>",
   "issues_found": 0,
   "acceptance_criteria_checked": 5,
-  "schema_version": "1.2",
+  "schema_version": "1.3",
   "status": "approved",
   "issue_counts": {"critical": 0, "important": 0, "minor": 0},
   "issues": [],
@@ -568,14 +568,15 @@ Free-form reasons are rejected — the enum is the contract.
   "project_checks": [],
   "testing_strategy": {"status": "passed", "note": "<rationale>"},
   "patterns": {"status": "passed", "note": "<rationale>"},
-  "pitfalls": {"status": "passed", "note": "<rationale>"}
+  "pitfalls": {"status": "passed", "note": "<rationale>"},
+  "security_considerations": {"status": "passed", "note": "<rationale>"}
 }
 ```
 
 When the `task-reviewer` custom agent was dispatched, `reviewer_result` is the reviewer
 agent's emitted structured JSON block (`schema_version`, `status`,
 `issue_counts`, `issues[]`, `acceptance_criteria[]`, `project_checks[]`, and the
-per-section `testing_strategy`/`patterns`/`pitfalls` verdicts) copied
+per-section `testing_strategy`/`patterns`/`pitfalls`/`security_considerations` verdicts) copied
 verbatim and **merged** with the dispatch telemetry plus the derived legacy
 summary fields. The structured fields are what the Kanban review queue renders
 (issue list, acceptance verdicts, code-review checks); omitting them strips the
@@ -594,7 +595,7 @@ Copy exactly the keys the reviewer agent produced. An approved review still
 emits `issues: []` and `project_checks: []` (the agent emits those arrays
 unconditionally), so the empty arrays in the examples above are real, not
 placeholders. But keys the agent did NOT emit — e.g. per-section
-`testing_strategy`/`patterns`/`pitfalls` verdicts on schema versions that don't
+`testing_strategy`/`patterns`/`pitfalls`/`security_considerations` verdicts on schema versions that don't
 produce them — must be omitted entirely, not sent as empty placeholders (per
 `stride-workflow` Step 6).
 
@@ -827,7 +828,7 @@ REQUIRED BODY: {
 }
 
 reviewer_result (dispatched) = the task-reviewer agent's fenced ```json block
-(schema_version/status/issue_counts/issues[]/acceptance_criteria[]/project_checks[]/testing_strategy/patterns/pitfalls)
+(schema_version/status/issue_counts/issues[]/acceptance_criteria[]/project_checks[]/testing_strategy/patterns/pitfalls/security_considerations)
 merged with dispatched:true + duration_ms + derived legacy issues_found/acceptance_criteria_checked.
 See stride-workflow Step 6 for extraction; schema owned by stride/agents/task-reviewer.md.
 
