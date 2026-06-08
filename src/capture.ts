@@ -321,14 +321,22 @@ export async function resolveStrideApiToken(
 }
 
 /**
- * Fire-and-forget PUT the captured snapshot to the Stride server. Body is
- * wrapped as `{"changed_files": [...]}` — never a bare array — because a
- * bare top-level array lands at `params['_json']` under Plug.Parsers,
- * validates as `{:ok, nil}`, and is persisted as NULL (G174 root cause).
+ * Fire-and-forget PUT the captured snapshot to the Stride server.
+ *
+ * D61: the body is the transport-encoded envelope
+ * `{"changed_files":{"encoding":"base64","data":"<b64>"}}` rather than the raw
+ * array, so an edge request filter (WAF) does not misread a unified code diff
+ * as an attack payload and silently drop the upload. The server decodes the
+ * base64 back to the identical list. The base64 is single-line. If base64
+ * encoding is unavailable we fall back to the raw `{"changed_files":[...]}`
+ * object — never a bare top-level array, which would land at `params['_json']`
+ * under Plug.Parsers, validate as `{:ok, nil}`, and persist as NULL (G174).
  *
  * Returns silently on any prerequisite miss (no apiBase, no token, no
- * taskId) so the caller never has to gate. All fetch errors are swallowed
- * inside the try/catch — after_doing must remain blocking-but-not-fragile.
+ * taskId) so the caller never has to gate. A non-2xx response and any fetch
+ * error are surfaced as a stderr warning (never the token) rather than being
+ * dropped — after_doing must remain blocking-but-not-fragile, so we warn
+ * rather than throw.
  */
 export async function putChangedFiles(
   apiBase: string | null,
@@ -338,16 +346,33 @@ export async function putChangedFiles(
 ): Promise<void> {
   if (!apiBase || !token || !taskId) return;
   const url = `${apiBase.replace(/\/+$/, "")}/api/tasks/${taskId}/changed_files`;
+
+  let body: string;
   try {
-    await fetch(url, {
+    const b64 = Buffer.from(JSON.stringify(files), "utf8").toString("base64");
+    body = JSON.stringify({ changed_files: { encoding: "base64", data: b64 } });
+  } catch {
+    body = JSON.stringify({ changed_files: files });
+  }
+
+  try {
+    const resp = await fetch(url, {
       method: "PUT",
       headers: {
         Authorization: `Bearer ${token}`,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({ changed_files: files }),
+      body,
     });
+    if (!resp.ok) {
+      // Surface a failed upload instead of dropping it silently. The diff is
+      // non-fatal to completion, so we warn rather than throw.
+      console.error(
+        `stride-hook: changed_files upload failed (HTTP ${resp.status}) for task ${taskId}`,
+      );
+    }
   } catch {
     // fire-and-forget — never block completion on upload failure
+    console.error(`stride-hook: changed_files upload failed for task ${taskId}`);
   }
 }

@@ -282,7 +282,7 @@ describe("putChangedFiles", () => {
     globalThis.fetch = originalFetch;
   });
 
-  it("PUTs to /api/tasks/{taskId}/changed_files with wrapped body", async () => {
+  it("PUTs the base64-encoded changed_files envelope (D61)", async () => {
     const files: ChangedFile[] = [{ path: "foo.txt", diff: "unified patch body" }];
     await putChangedFiles("https://stride.example.com", "test_token_abc123", "42", files);
 
@@ -293,19 +293,57 @@ describe("putChangedFiles", () => {
     expect(headers.Authorization).toBe("Bearer test_token_abc123");
     expect(headers["Content-Type"]).toBe("application/json");
     const body = captured!.init.body as string;
-    // Wrapped body shape (G174 fix — never a bare array)
-    expect(body).toBe(JSON.stringify({ changed_files: files }));
+    // D61: transport-encoded envelope, NOT a bare array and NOT raw diff text.
     const parsed = JSON.parse(body);
-    expect(parsed).toEqual({ changed_files: files });
+    expect(parsed.changed_files.encoding).toBe("base64");
+    expect(typeof parsed.changed_files.data).toBe("string");
     expect(Array.isArray(parsed)).toBe(false);
+    // Raw diff/path text must be absent from the wire body (it is base64).
+    expect(body).not.toContain("foo.txt");
+    // Round-trip: the data field is base64 of the snapshot array JSON and
+    // decodes back to the original files list.
+    const expectedData = Buffer.from(JSON.stringify(files), "utf8").toString("base64");
+    expect(parsed.changed_files.data).toBe(expectedData);
+    expect(
+      JSON.parse(Buffer.from(parsed.changed_files.data, "base64").toString("utf8")),
+    ).toEqual(files);
   });
 
-  it("wraps empty snapshot as {\"changed_files\": []} — not bare array", async () => {
+  it("wraps empty snapshot as the base64-encoded envelope (D61) — not a bare array", async () => {
     await putChangedFiles("https://stride.example.com", "tok", "42", []);
     expect(captured).not.toBeNull();
     const body = captured!.init.body as string;
-    expect(body).toBe('{"changed_files":[]}');
-    expect(JSON.parse(body)).toEqual({ changed_files: [] });
+    const parsed = JSON.parse(body);
+    expect(parsed.changed_files.encoding).toBe("base64");
+    expect(Array.isArray(parsed)).toBe(false);
+    const expectedData = Buffer.from(JSON.stringify([]), "utf8").toString("base64");
+    expect(parsed.changed_files.data).toBe(expectedData);
+    expect(
+      JSON.parse(Buffer.from(parsed.changed_files.data, "base64").toString("utf8")),
+    ).toEqual([]);
+  });
+
+  it("warns to stderr on a non-2xx response without throwing (D61)", async () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (globalThis as any).fetch = async (url: string, init: RequestInit) => {
+      captured = { url, init };
+      return new Response("nope", { status: 500 });
+    };
+    const errors: string[] = [];
+    const originalError = console.error;
+    console.error = (...args: unknown[]) => {
+      errors.push(args.join(" "));
+    };
+    try {
+      await putChangedFiles("https://stride.example.com", "tok", "42", []);
+    } finally {
+      console.error = originalError;
+    }
+    expect(
+      errors.some((e) => e.includes("changed_files upload failed (HTTP 500) for task 42")),
+    ).toBe(true);
+    // The token must never appear in the warning.
+    expect(errors.join(" ")).not.toContain("tok");
   });
 
   it("strips trailing slash from apiBase", async () => {
