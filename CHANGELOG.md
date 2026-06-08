@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.14.0] - 2026-06-08
+
+Bundled release covering two ports from the main `stride` plugin (G217 + G218 parity).
+
+### Added
+
+- **`src/capture.ts`** (W1046 / D61) — `putChangedFiles` now uploads the per-file diff snapshot to `/api/tasks/:id/changed_files` as a **transport-encoded envelope** — `{"changed_files":{"encoding":"base64","data":"<base64>"}}` — instead of the raw `{"changed_files":[...]}` array. An edge request filter (WAF) in front of the Stride server can misread a dense code diff as an attack payload and silently drop the upload, leaving `changed_files` empty in the review queue; base64-wrapping the body (via `Buffer.from(JSON.stringify(files)).toString("base64")`) neutralizes that false positive while the server decodes it back to the identical list. Falls back to the raw `{"changed_files":files}` object (never a bare array) if encoding fails, and a non-2xx response (and any fetch error) is surfaced via `console.error` without throwing — the bearer token is never logged. `src/capture.test.ts` asserts the encoded envelope, raw-text absence, base64 round-trip, and the non-2xx warning (`bun test` 135/0).
+
+### Fixed
+
+- **`skills/stride-workflow/SKILL.md`** (W1054 / D63) — The "Extracting the structured review block" guidance built `reviewer_result` from a hand-maintained enumerated copy-list of structured keys that omitted `project_checks`, so the reviewer's CODE-REVIEW.md per-bullet audit was silently dropped on completion and the Kanban review queue's **Code review** panel rendered nothing. The guidance is now a **verbatim passthrough**: copy the reviewer's entire parsed JSON object into `reviewer_result` and overlay only the legacy summary fields. The fallback (no parseable JSON block) was inverted to a legacy-only send list so it no longer enumerates structured keys either.
+
+### Updated
+
+- **`agents/task-reviewer.md`** (W1054 / W1049) — Added an explicit **consumption invariant**: the canonical schema is the only place the structured key-set is enumerated, and the completion path MUST persist the reviewer's emitted JSON verbatim and MUST NOT maintain its own allow-list of keys to copy.
+
+### Backward compatibility
+
+Wire-shape: the `changed_files` envelope requires a Stride server that accepts the `base64` / `gzip+base64` encodings on `/changed_files` (ships in the kanban repo); the raw-object fallback path remains compatible with the prior shape. The `reviewer_result` change is documentation/skill-instruction only — `project_checks[]` already existed and is already rendered by the review queue; this release simply stops dropping it. No reviewer_result is constructed in TypeScript — the transport change is confined to `putChangedFiles`. Not distributed through a marketplace (installed via `npm install opencode-stride`).
+
+### Source
+
+W1046 (D61 base64 changed_files transport port), W1054 (D63 reviewer_result verbatim passthrough + W1049 consumption invariant). Mirrors the main `stride` plugin's 1.22.0 (D61) and 1.22.1 (project_checks) releases.
+
 ## [1.13.0] - 2026-06-06
 
 Parity release bringing the OpenCode plugin in line with canonical stride G210, which adds `security_considerations` as the **fifth** review_queue-scored field (alongside `acceptance_criteria`, `testing_strategy`, `pitfalls`, `patterns_to_follow`). Feature minor. All five content-bearing skill/agent files now treat `security_considerations` as a first-class scored deliverable, and the reviewer emits a fifth section verdict at `schema_version` **1.3**.
