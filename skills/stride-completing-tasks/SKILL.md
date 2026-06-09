@@ -558,7 +558,7 @@ Free-form reasons are rejected — the enum is the contract.
   "summary": "<40+ non-whitespace characters describing what was reviewed>",
   "issues_found": 0,
   "acceptance_criteria_checked": 5,
-  "schema_version": "1.3",
+  "schema_version": "1.4",
   "status": "approved",
   "issue_counts": {"critical": 0, "important": 0, "minor": 0},
   "issues": [],
