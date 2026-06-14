@@ -258,13 +258,17 @@ Non-Stride commands pass through without any intervention.
 | Hook | When | Blocking | Timeout |
 |------|------|----------|---------|
 | `before_doing` | After claiming a task | Yes | 60s |
-| `after_doing` | Before marking complete | Yes | 120s |
-| `before_review` | After marking complete | Yes | 60s |
-| `after_review` | After review approval | Yes | 60s |
+| `after_doing` | Before marking complete | Yes | host-controlled |
+| `before_review` | After marking complete | Yes | host-controlled |
+| `after_review` | After review approval | Yes | host-controlled |
 
 **Blocking hooks** prevent the API call from proceeding if any command fails. The agent receives a structured error with the failed command, exit code, and output.
 
-**Per-file diff upload (`changed_files`).** After a successful `after_doing` hook, the plugin captures the per-file working-tree diff to `.stride-changed-files.json` and fire-and-forgets a `PUT /api/tasks/:id/changed_files` so the Stride review queue shows the agent's diff. The upload URL and bearer token are resolved from your project's `.stride_auth.md` (the production `**API Token:**` line — deliberately **not** the `**Local API Token:**` line), falling back to the literal URL/token in the intercepted completion command. The upload is non-fatal (a missing auth file, network error, or absent endpoint degrades silently) and never logs the token.
+**Hook time budget (no `hooks.json` to tune).** Unlike the shell-based plugins, the OpenCode variant has **no `hooks.json`** — hooks run inside the OpenCode `tool.execute.before`/`tool.execute.after` handlers, so the time budget is controlled by the host runtime, not by a plugin-side timeout field. The canonical plugins raised their `after_doing` `hooks.json` timeout from **120s to 300s** (W1096) to give heavy test/lint/build suites room to finish before the diff upload is captured; that change is **N/A for stride-opencode** — there is no plugin-side timeout to bump. Keep your `## after_doing` commands within whatever budget the host enforces; if a long suite risks being cut off, split or shorten it rather than expecting a plugin timeout knob.
+
+**Per-file diff upload (`changed_files`).** After a successful `after_doing` hook, the plugin captures the per-file working-tree diff to `.stride-changed-files.json` and fire-and-forgets a `PUT /api/tasks/:id/changed_files` so the Stride review queue shows the agent's diff. The upload URL and bearer token are resolved from your project's `.stride_auth.md` (the production `**API Token:**` line — deliberately **not** the `**Local API Token:**` line), falling back to the literal URL/token in the intercepted completion command. The upload is non-fatal (a missing auth file, network error, or absent endpoint degrades silently) and never logs the token. If the upload is interrupted (e.g. the host cuts off a long `after_doing` run after the commit but before the PUT lands), the plugin records the attempt's task id and HTTP status in `.stride-diff-upload-state` and self-heals the upload on the next claim.
+
+**Gitignored state artifacts.** Both `.stride-changed-files.json` (the captured per-file diff) and `.stride-diff-upload-state` (the upload bookkeeping marker) are **regenerated on every `after_doing` run** and are listed in `.gitignore`. They are transient hook state, not source — committing them would pollute diffs and could leak the previous task's working-tree contents, so they stay out of the `after_doing` auto-commit and out of version control entirely.
 
 ### `.stride.md` parser rules
 
