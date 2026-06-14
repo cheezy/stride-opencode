@@ -176,12 +176,19 @@ Produce an ordered implementation plan. Follow this plan during implementation.
 
 **When:** Task complexity is medium or large, OR task has 2+ key_files. Skip only for small tasks with 0-1 key_files.
 
-**What to do:** Invoke the `task-reviewer` custom agent, passing:
-- The git diff of all your changes
+**What to do:** Invoke the `task-reviewer` custom agent, passing the git diff of all your changes AND **every review field the task supplies — NO EXCEPTIONS, never a subset:**
 - The task's `acceptance_criteria`
 - The task's `pitfalls` array
 - The task's `patterns_to_follow` text
 - The task's `testing_strategy` object
+- The task's `security_considerations`
+- The task's `description`
+- The task's `what`
+- The task's `why`
+
+This input list is owned by the reviewer's contract — keep it in sync with the "You will receive" line in `agents/task-reviewer.md` and the Code Review step in `stride-workflow`; do not maintain a shorter list here. Omitting a supplied field (most often `security_considerations`) is the D60 defect where a task's security considerations came back `not_assessed`.
+
+**Copy the whole structured block into `reviewer_result` — never a subset.** Beyond the prose `review_report`, the reviewer's structured JSON block must be carried into `reviewer_result` by a mechanical whole-object copy, then verified by the mandatory self-check before submission. The passthrough mechanics and the self-check (every section present; `project_checks` count equals the reviewer's; no `not_assessed` for a task-supplied section) are owned by `stride-workflow` ("Extracting the structured review block") and `stride-completing-tasks` ("MANDATORY pre-submission self-check") — follow them; do not re-enumerate or sub-select keys here.
 
 The reviewer returns a human-readable prose summary followed by a fenced ```json block. The schema of that block is owned by [`stride/agents/task-reviewer.md`](https://github.com/cheezy/stride/blob/main/agents/task-reviewer.md) — do not duplicate field definitions here.
 
