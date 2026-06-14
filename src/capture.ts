@@ -332,19 +332,21 @@ export async function resolveStrideApiToken(
  * object — never a bare top-level array, which would land at `params['_json']`
  * under Plug.Parsers, validate as `{:ok, nil}`, and persist as NULL (G174).
  *
- * Returns silently on any prerequisite miss (no apiBase, no token, no
- * taskId) so the caller never has to gate. A non-2xx response and any fetch
- * error are surfaced as a stderr warning (never the token) rather than being
- * dropped — after_doing must remain blocking-but-not-fragile, so we warn
- * rather than throw.
+ * Returns `null` on any prerequisite miss (no apiBase, no token, no taskId) so
+ * the caller never has to gate AND can tell that no PUT was attempted (W1094:
+ * a skipped PUT records no upload-state). Otherwise returns the HTTP status
+ * code — `0` on a transport failure, mirroring the bash twin's `'000'`. A
+ * non-2xx response and any fetch error are surfaced as a stderr warning (never
+ * the token) rather than being dropped — after_doing must remain
+ * blocking-but-not-fragile, so we warn rather than throw.
  */
 export async function putChangedFiles(
   apiBase: string | null,
   token: string | null,
   taskId: string | null | undefined,
   files: ChangedFile[],
-): Promise<void> {
-  if (!apiBase || !token || !taskId) return;
+): Promise<number | null> {
+  if (!apiBase || !token || !taskId) return null;
   const url = `${apiBase.replace(/\/+$/, "")}/api/tasks/${taskId}/changed_files`;
 
   let body: string;
@@ -371,8 +373,60 @@ export async function putChangedFiles(
         `stride-hook: changed_files upload failed (HTTP ${resp.status}) for task ${taskId}`,
       );
     }
+    return resp.status;
   } catch {
     // fire-and-forget — never block completion on upload failure
     console.error(`stride-hook: changed_files upload failed for task ${taskId}`);
+    return 0;
+  }
+}
+
+/**
+ * (W1094) Record the outcome of a changed_files PUT attempt so the
+ * before_review self-heal can verify it on a fresh budget. Writes ONLY the
+ * task id and HTTP code — never the URL or bearer token — to
+ * `${projectDir}/.stride-diff-upload-state`. Best-effort: a failed write must
+ * never block completion.
+ */
+export async function recordDiffUploadState(
+  projectDir: string,
+  taskId: string,
+  httpCode: number,
+): Promise<void> {
+  try {
+    await Bun.write(
+      `${projectDir}/.stride-diff-upload-state`,
+      `task_id=${taskId}\nhttp_code=${httpCode}\n`,
+    );
+  } catch {
+    // best-effort — never block on a failed state write
+  }
+}
+
+/**
+ * (W1094) Read the recorded changed_files upload outcome, or `null` when the
+ * state file is absent or unreadable (treated as "no healthy upload on
+ * record"). Parses only `task_id` and `http_code` lines.
+ */
+export async function readDiffUploadState(
+  projectDir: string,
+): Promise<{ taskId: string; httpCode: string } | null> {
+  try {
+    const file = Bun.file(`${projectDir}/.stride-diff-upload-state`);
+    if (!(await file.exists())) return null;
+    const text = await file.text();
+    let taskId = "";
+    let httpCode = "";
+    for (const line of text.split("\n")) {
+      const eq = line.indexOf("=");
+      if (eq === -1) continue;
+      const key = line.slice(0, eq);
+      const value = line.slice(eq + 1).trim();
+      if (key === "task_id" && !taskId) taskId = value;
+      else if (key === "http_code" && !httpCode) httpCode = value;
+    }
+    return { taskId, httpCode };
+  } catch {
+    return null;
   }
 }

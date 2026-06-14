@@ -10,6 +10,8 @@ import {
   resolveStrideApiUrl,
   resolveStrideApiToken,
   putChangedFiles,
+  recordDiffUploadState,
+  readDiffUploadState,
   TRUNC_MARKER,
   BIN_PLACEHOLDER,
   MAX_LINES,
@@ -377,6 +379,82 @@ describe("putChangedFiles", () => {
     await putChangedFiles("https://stride.example.com", "tok", "42", [
       { path: "a.txt", diff: "" },
     ]);
+  });
+
+  it("returns the HTTP status code on a 2xx (W1094)", async () => {
+    const code = await putChangedFiles("https://stride.example.com", "tok", "42", []);
+    expect(code).toBe(200);
+  });
+
+  it("returns the HTTP status code on a non-2xx (W1094)", async () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (globalThis as any).fetch = async () => new Response("nope", { status: 503 });
+    const originalError = console.error;
+    console.error = () => {};
+    try {
+      const code = await putChangedFiles("https://stride.example.com", "tok", "42", []);
+      expect(code).toBe(503);
+    } finally {
+      console.error = originalError;
+    }
+  });
+
+  it("returns 0 on a transport failure, mirroring the bash '000' (W1094)", async () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (globalThis as any).fetch = async () => {
+      throw new Error("ECONNREFUSED");
+    };
+    const originalError = console.error;
+    console.error = () => {};
+    try {
+      const code = await putChangedFiles("https://stride.example.com", "tok", "42", []);
+      expect(code).toBe(0);
+    } finally {
+      console.error = originalError;
+    }
+  });
+
+  it("returns null (no PUT attempted) on a prerequisite miss (W1094)", async () => {
+    expect(await putChangedFiles(null, "tok", "42", [])).toBeNull();
+    expect(await putChangedFiles("https://stride.example.com", null, "42", [])).toBeNull();
+    expect(await putChangedFiles("https://stride.example.com", "tok", null, [])).toBeNull();
+  });
+});
+
+describe("recordDiffUploadState / readDiffUploadState (W1094)", () => {
+  it("records ONLY task id + HTTP code — never a URL or token", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "stride-state-"));
+    try {
+      await recordDiffUploadState(dir, "42", 200);
+      const text = require("node:fs").readFileSync(
+        join(dir, ".stride-diff-upload-state"),
+        "utf8",
+      );
+      expect(text).toBe("task_id=42\nhttp_code=200\n");
+      expect(text).not.toMatch(/Bearer|https?:\/\//);
+    } finally {
+      cleanup(dir);
+    }
+  });
+
+  it("round-trips through readDiffUploadState", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "stride-state-"));
+    try {
+      await recordDiffUploadState(dir, "99", 503);
+      const state = await readDiffUploadState(dir);
+      expect(state).toEqual({ taskId: "99", httpCode: "503" });
+    } finally {
+      cleanup(dir);
+    }
+  });
+
+  it("returns null when the state file is absent", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "stride-state-"));
+    try {
+      expect(await readDiffUploadState(dir)).toBeNull();
+    } finally {
+      cleanup(dir);
+    }
   });
 });
 

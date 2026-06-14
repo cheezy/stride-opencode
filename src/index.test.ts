@@ -1,4 +1,8 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, beforeEach, afterEach } from "bun:test";
+import { mkdtempSync, rmSync, writeFileSync, existsSync, readFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { $ } from "bun";
 import {
   parseStrideMd,
   filterCommands,
@@ -8,6 +12,7 @@ import {
   extractToolArgs,
   extractEnvFromResponse,
   responseHasAfterGoal,
+  StridePlugin,
 } from "./index";
 
 // --- parseStrideMd tests ---
@@ -511,5 +516,208 @@ describe("responseHasAfterGoal", () => {
       }),
     });
     expect(responseHasAfterGoal(input)).toBe(true);
+  });
+});
+
+// --- StridePlugin W1093/W1094: diff-upload survives an after_doing timeout ---
+//
+// These instantiate the plugin factory with a real git temp repo, a real bun
+// `$`, and a stubbed global fetch that records the changed_files PUT calls and
+// returns a configurable status. They drive the tool.execute.before/after
+// handlers to exercise the early-capture (W1093) and self-heal (W1094) paths.
+
+describe("StridePlugin — W1093 early capture + W1094 self-heal", () => {
+  const originalFetch = globalThis.fetch;
+  let putCalls: string[] = [];
+  let nextStatus = 200;
+
+  function stubFetch(): void {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (globalThis as any).fetch = async (url: string) => {
+      if (typeof url === "string" && url.includes("/changed_files")) {
+        putCalls.push(url);
+      }
+      return new Response("", { status: nextStatus });
+    };
+  }
+
+  beforeEach(() => {
+    putCalls = [];
+    nextStatus = 200;
+    stubFetch();
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  async function initRepo(): Promise<string> {
+    const dir = mkdtempSync(join(tmpdir(), "stride-oc-plugin-"));
+    await $`git init -q`.cwd(dir).quiet();
+    await $`git config user.email "test@test.local"`.cwd(dir).quiet();
+    await $`git config user.name "Test"`.cwd(dir).quiet();
+    writeFileSync(join(dir, ".gitignore"), ".stride.md\n.stride-changed-files.json\n.stride-diff-upload-state\nearly-snapshot.json\n");
+    writeFileSync(join(dir, "tracked.txt"), "v1\n");
+    await $`git add .gitignore tracked.txt`.cwd(dir).quiet();
+    await $`git commit -q -m v1`.cwd(dir).quiet();
+    return dir;
+  }
+
+  function cleanup(dir: string): void {
+    try { rmSync(dir, { recursive: true, force: true }); } catch { /* best-effort */ }
+  }
+
+  const CLAIM_CMD = "curl -X POST http://localhost/api/tasks/claim";
+  // A /complete command carrying the URL + token literals so resolveStrideApiUrl
+  // / resolveStrideApiToken succeed with no .stride_auth.md present.
+  const COMPLETE_CMD =
+    'curl -X PATCH http://localhost/api/tasks/42/complete -H "Authorization: Bearer tok"';
+  const CLAIM_RESPONSE = JSON.stringify({
+    data: { id: 42, identifier: "W42", title: "T", status: "in_progress" },
+  });
+
+  async function instantiate(dir: string) {
+    const hooks = await StridePlugin({ directory: dir, worktree: dir, $ } as never);
+    return hooks as {
+      "tool.execute.before": (i: unknown, o?: unknown) => Promise<void>;
+      "tool.execute.after": (i: unknown, o?: unknown) => Promise<void>;
+    };
+  }
+
+  it("W1093: an empty after_doing section still captures + uploads + records state", async () => {
+    const dir = await initRepo();
+    try {
+      const hooks = await instantiate(dir);
+      // Claim populates envCache (TASK_ID=42) + TASK_BASE_REF.
+      await hooks["tool.execute.after"]({ input: { command: CLAIM_CMD } }, CLAIM_RESPONSE);
+      putCalls = [];
+      // Empty after_doing section → finalizeAfterDoing runs on the no-commands
+      // path (no executeCommands), writing the snapshot, PUTting it, recording.
+      writeFileSync(join(dir, ".stride.md"), "## after_doing\n\n```bash\n```\n");
+      await hooks["tool.execute.before"]({ input: { command: COMPLETE_CMD } });
+      expect(existsSync(join(dir, ".stride-changed-files.json"))).toBe(true);
+      expect(putCalls.length).toBe(1);
+      const state = readFileSync(join(dir, ".stride-diff-upload-state"), "utf8");
+      expect(state).toBe("task_id=42\nhttp_code=200\n");
+    } finally {
+      cleanup(dir);
+    }
+  });
+
+  it("W1093: early snapshot + PUT survive a FAILING after_doing gate (uploaded before the gate completes)", async () => {
+    const dir = await initRepo();
+    try {
+      const hooks = await instantiate(dir);
+      await hooks["tool.execute.after"]({ input: { command: CLAIM_CMD } }, CLAIM_RESPONSE);
+      putCalls = [];
+      writeFileSync(
+        join(dir, ".stride.md"),
+        "## after_doing\n\n```bash\nbash -c 'exit 7'\n```\n",
+      );
+      // The before-handler throws to block completion on a failed gate.
+      let threw = false;
+      try {
+        await hooks["tool.execute.before"]({ input: { command: COMPLETE_CMD } });
+      } catch {
+        threw = true;
+      }
+      expect(threw).toBe(true);
+      // The early PUT already happened before the gate ran/failed — so a slow or
+      // failing after_doing gate can no longer lose the diff. Exactly one PUT
+      // (the post-commands refresh is skipped because the gate failed).
+      expect(putCalls.length).toBe(1);
+      expect(existsSync(join(dir, ".stride-changed-files.json"))).toBe(true);
+    } finally {
+      cleanup(dir);
+    }
+  });
+
+  it("W1094: before_review re-uploads when NO state is on record", async () => {
+    const dir = await initRepo();
+    try {
+      const hooks = await instantiate(dir);
+      await hooks["tool.execute.after"]({ input: { command: CLAIM_CMD } }, CLAIM_RESPONSE);
+      putCalls = []; // ignore any claim-path activity
+      await hooks["tool.execute.after"]({ input: { command: COMPLETE_CMD } }, "");
+      expect(putCalls.length).toBe(1);
+      const state = readFileSync(join(dir, ".stride-diff-upload-state"), "utf8");
+      expect(state).toBe("task_id=42\nhttp_code=200\n");
+    } finally {
+      cleanup(dir);
+    }
+  });
+
+  it("W1094: before_review does NOT re-upload on a healthy 2xx for the current task", async () => {
+    const dir = await initRepo();
+    try {
+      const hooks = await instantiate(dir);
+      await hooks["tool.execute.after"]({ input: { command: CLAIM_CMD } }, CLAIM_RESPONSE);
+      writeFileSync(join(dir, ".stride-diff-upload-state"), "task_id=42\nhttp_code=200\n");
+      putCalls = [];
+      await hooks["tool.execute.after"]({ input: { command: COMPLETE_CMD } }, "");
+      expect(putCalls.length).toBe(0);
+    } finally {
+      cleanup(dir);
+    }
+  });
+
+  it("W1094: before_review re-uploads when state names a DIFFERENT task", async () => {
+    const dir = await initRepo();
+    try {
+      const hooks = await instantiate(dir);
+      await hooks["tool.execute.after"]({ input: { command: CLAIM_CMD } }, CLAIM_RESPONSE);
+      writeFileSync(join(dir, ".stride-diff-upload-state"), "task_id=41\nhttp_code=200\n");
+      putCalls = [];
+      await hooks["tool.execute.after"]({ input: { command: COMPLETE_CMD } }, "");
+      expect(putCalls.length).toBe(1);
+      const state = readFileSync(join(dir, ".stride-diff-upload-state"), "utf8");
+      expect(state).toBe("task_id=42\nhttp_code=200\n");
+    } finally {
+      cleanup(dir);
+    }
+  });
+
+  it("W1094: before_review re-uploads on a recorded non-2xx for the current task", async () => {
+    const dir = await initRepo();
+    try {
+      const hooks = await instantiate(dir);
+      await hooks["tool.execute.after"]({ input: { command: CLAIM_CMD } }, CLAIM_RESPONSE);
+      writeFileSync(join(dir, ".stride-diff-upload-state"), "task_id=42\nhttp_code=503\n");
+      putCalls = [];
+      await hooks["tool.execute.after"]({ input: { command: COMPLETE_CMD } }, "");
+      expect(putCalls.length).toBe(1);
+    } finally {
+      cleanup(dir);
+    }
+  });
+
+  it("W1094: claim refresh clears a prior task's upload state", async () => {
+    const dir = await initRepo();
+    try {
+      const hooks = await instantiate(dir);
+      writeFileSync(join(dir, ".stride-diff-upload-state"), "task_id=41\nhttp_code=200\n");
+      await hooks["tool.execute.after"]({ input: { command: CLAIM_CMD } }, CLAIM_RESPONSE);
+      expect(existsSync(join(dir, ".stride-diff-upload-state"))).toBe(false);
+    } finally {
+      cleanup(dir);
+    }
+  });
+
+  it("W1094: after_review cleanup removes the upload state", async () => {
+    const dir = await initRepo();
+    try {
+      const hooks = await instantiate(dir);
+      await hooks["tool.execute.after"]({ input: { command: CLAIM_CMD } }, CLAIM_RESPONSE);
+      writeFileSync(join(dir, ".stride-diff-upload-state"), "task_id=42\nhttp_code=200\n");
+      // A .stride.md must exist (real usage always has one) so the after-handler
+      // reaches the after_review cleanup rather than the no-.stride.md early
+      // return. No after_review section ⇒ no commands run.
+      writeFileSync(join(dir, ".stride.md"), "## before_doing\n\n```bash\necho hi\n```\n");
+      const reviewCmd = "curl -X PATCH http://localhost/api/tasks/42/mark_reviewed";
+      await hooks["tool.execute.after"]({ input: { command: reviewCmd } }, "");
+      expect(existsSync(join(dir, ".stride-diff-upload-state"))).toBe(false);
+    } finally {
+      cleanup(dir);
+    }
   });
 });

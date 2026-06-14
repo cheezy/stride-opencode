@@ -6,6 +6,8 @@ import {
   resolveStrideApiUrl,
   resolveStrideApiToken,
   putChangedFiles,
+  recordDiffUploadState,
+  readDiffUploadState,
 } from "./capture";
 
 // Re-export parser functions for backwards compatibility
@@ -18,6 +20,8 @@ export {
   resolveStrideApiUrl,
   resolveStrideApiToken,
   putChangedFiles,
+  recordDiffUploadState,
+  readDiffUploadState,
   AUTH_FILE,
   TRUNC_MARKER,
   BIN_PLACEHOLDER,
@@ -249,6 +253,18 @@ export const StridePlugin: Plugin = async ({
     }
   }
 
+  // (W1094) Remove a stale .stride-diff-upload-state from a prior task — a
+  // leftover 2xx would otherwise suppress the new task's before_review
+  // self-heal retry.
+  const uploadStatePath = `${projectDir}/.stride-diff-upload-state`;
+  async function clearDiffUploadState(): Promise<void> {
+    try {
+      await Bun.file(uploadStatePath).unlink();
+    } catch {
+      // File didn't exist — that's the expected path
+    }
+  }
+
   // Write the changed-files snapshot after after_doing succeeds, then
   // fire-and-forget PUT it to the Stride server (G162 + G174). The on-disk
   // snapshot is preserved so legacy --argjson cf consumers on older
@@ -274,7 +290,54 @@ export const StridePlugin: Plugin = async ({
     // older servers).
     const apiBase = await resolveStrideApiUrl(projectDir, command);
     const token = await resolveStrideApiToken(projectDir, command);
-    await putChangedFiles(apiBase, token, envCache.TASK_ID, snapshot);
+    const httpCode = await putChangedFiles(
+      apiBase,
+      token,
+      envCache.TASK_ID,
+      snapshot,
+    );
+    // (W1094) Record the outcome after every actual PUT attempt so the
+    // before_review self-heal can verify it on a fresh budget. A skipped PUT
+    // (null — missing prerequisites) deliberately records nothing: missing
+    // state means "no healthy upload on record" and the retry re-checks the
+    // same prerequisites itself.
+    if (httpCode !== null && envCache.TASK_ID) {
+      await recordDiffUploadState(projectDir, envCache.TASK_ID, httpCode);
+    }
+  }
+
+  // (W1094) Self-heal for the changed_files upload. The after_doing gate can
+  // burn the whole hook budget, killing the process before or during the
+  // snapshot PUT — or the PUT itself returned non-2xx. before_review (the
+  // tool.execute.after pass on the same /complete call) runs on a FRESH budget,
+  // so it verifies the recorded outcome and re-captures + re-PUTs when no
+  // healthy upload is on record for the current task. Best-effort: never throws.
+  async function selfHealChangedFilesUpload(command: string): Promise<void> {
+    const taskId = envCache.TASK_ID;
+    if (!taskId) return;
+
+    // Healthy 2xx recorded for THIS task → do not re-upload (snapshot semantics
+    // anchor at after_doing time; avoid pointless API load). Short-circuit
+    // BEFORE resolving credentials so a healthy state never reads them.
+    const state = await readDiffUploadState(projectDir);
+    if (state && state.taskId === taskId && /^2/.test(state.httpCode)) return;
+
+    const apiBase = await resolveStrideApiUrl(projectDir, command);
+    const token = await resolveStrideApiToken(projectDir, command);
+    if (!apiBase || !token) return;
+
+    // Re-capture against the claim-time base ref and re-PUT.
+    let snapshot: { path: string; diff: string }[] = [];
+    try {
+      snapshot = await captureChangedFiles($, projectDir, envCache.TASK_BASE_REF);
+      await Bun.write(snapshotPath, JSON.stringify(snapshot, null, 2) + "\n");
+    } catch {
+      // Best-effort — never throw from the capture path
+    }
+    const httpCode = await putChangedFiles(apiBase, token, taskId, snapshot);
+    if (httpCode !== null) {
+      await recordDiffUploadState(projectDir, taskId, httpCode);
+    }
   }
 
   async function readStrideMd(): Promise<string | null> {
@@ -421,6 +484,15 @@ export const StridePlugin: Plugin = async ({
         return;
       }
 
+      // (W1093) Early per-file diff snapshot — capture and upload BEFORE the
+      // gate commands run, so a slow or timed-out after_doing gate can't kill
+      // the process before the diff upload completes. Gated on hookName so it
+      // stays inert for non-after_doing hooks. The post-loop call below remains
+      // as a refresh once the gate commands succeed (they may change files).
+      if (hookName === "after_doing") {
+        await finalizeAfterDoing(command);
+      }
+
       const result = await executeCommands(hookName, commands);
 
       if (result.status === "failed") {
@@ -440,8 +512,9 @@ export const StridePlugin: Plugin = async ({
         );
       }
 
-      // Write the per-file diff snapshot after after_doing succeeds, and
-      // fire-and-forget PUT it to the Stride server (G162 + G174).
+      // (W1093) Refresh the per-file diff snapshot after after_doing succeeds —
+      // the gate commands may have changed files since the early pre-loop
+      // capture above. Fire-and-forget PUT to the Stride server (G162 + G174).
       if (hookName === "after_doing") {
         await finalizeAfterDoing(command);
       }
@@ -477,8 +550,18 @@ export const StridePlugin: Plugin = async ({
         // projects just won't get the env var.
         const baseRef = await captureBaseRef();
         if (baseRef) envCache.TASK_BASE_REF = baseRef;
-        // Clear any stale changed-files snapshot from a prior task.
+        // Clear any stale changed-files snapshot and upload-state from a prior
+        // task (W1094 — a stale 2xx would suppress the new task's self-heal).
         await clearStaleSnapshot();
+        await clearDiffUploadState();
+      }
+
+      // (W1094) Changed-files upload self-heal — runs on the FRESH before_review
+      // budget and re-uploads the snapshot when no healthy 2xx is on record for
+      // the current task. Placed before the .stride.md early-return so it runs
+      // even when there is no before_review section to execute.
+      if (hookName === "before_review") {
+        await selfHealChangedFilesUpload(command);
       }
 
       const strideMd = await readStrideMd();
@@ -510,6 +593,7 @@ export const StridePlugin: Plugin = async ({
       if (hookName === "after_review") {
         envCache = {};
         await clearStaleSnapshot();
+        await clearDiffUploadState();
       }
 
       // --- After-goal routing (W793 / mirrors stride v1.17.1 W504) ---
