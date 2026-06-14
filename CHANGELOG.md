@@ -5,6 +5,40 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.16.0] - 2026-06-14
+
+Bundled parity release: brings the OpenCode variant to parity with canonical **stride v1.24.0–v1.28.0**. Delivered under goal **G232** (tasks W1122, W1123, D75, D76, D77, W1124). Feature minor (1.15.0 → 1.16.0).
+
+### Added
+
+- **`src/index.ts`, `src/capture.ts`** (W1123 / canonical v1.25.0, W1093+W1094) — **the per-file diff upload now survives an `after_doing` timeout.** The diff snapshot is captured **early** — `finalizeAfterDoing` runs before `executeCommands`, so the `changed_files` payload is built from the working tree even if a long-running command is later cut off by the host. `putChangedFiles` returns the HTTP status (or `null` when no PUT was attempted or the transport failed), and `recordDiffUploadState` / `readDiffUploadState` persist the attempt's task id + HTTP code to `.stride-diff-upload-state`. On the next claim, `selfHealChangedFilesUpload` re-attempts any upload that did not land a healthy `2xx` (short-circuiting before credential resolution when the recorded status is already healthy), and the marker is cleared at claim refresh and after `after_review`. `src/capture.test.ts` / `src/index.test.ts` cover the early-capture ordering, the state round-trip, and the self-heal path (`bun test` 157/0).
+
+### Updated
+
+- **`agents/task-reviewer.md`, `skills/stride-workflow/SKILL.md`, `skills/stride-subagent-workflow/SKILL.md`, `skills/stride-completing-tasks/SKILL.md`** (W1122 / canonical v1.24.0, G222 / W1072–W1076) — **review-report completeness.** The reviewer dispatch contract is expanded to pass **every** review field the task supplies (8 fields, no subset, no small-task discount), the per-section `not_assessed` verdict is restricted to "ONLY when the task itself omits the section," and a "Verdict rule for all four section tiles" paragraph is added. The completion path documents a **mechanical whole-object copy** of the reviewer's parsed JSON into `reviewer_result` plus a **MANDATORY pre-submission self-check** (every section present; `project_checks` count equals the reviewer's emitted count; no `not_assessed` for a task-supplied section) as a hard gate.
+- **`agents/task-reviewer.md`, `skills/stride-workflow/SKILL.md`** (D77 / canonical v1.26.0, D66) — **verbatim acceptance-criteria restatement.** The reviewer must restate each acceptance criterion **1:1 verbatim, one entry per criterion** (no merging, splitting, or paraphrasing); the workflow skill adds the "Re-review and follow-up rounds (D66)" rule and a JS self-check that throws (forcing re-invoke) when the emitted `acceptance_criteria` count diverges from the task's criterion-line count, rather than truncating or padding.
+
+### Fixed
+
+- **`src/capture.ts`** (D75 / canonical v1.27.0, D67) — **the hook's own state artifacts are excluded from the `changed_files` snapshot.** A `ROOT_ARTIFACTS` set (`.stride-diff-upload-state`, `.stride-changed-files.json`) is filtered out in the dedupe pass so the upload bookkeeping marker and the captured-diff file never appear in the diff the reviewer sees.
+- **`src/index.ts`** (D76 / canonical v1.26.0, D65) — **passing-gate command output is kept off `process.stderr`** and folded into the structured `commands_output` array (each entry sliced to the last 2000 chars) on the success path, so a green `after_doing` run no longer leaks noisy output to stderr; the `HookResult` shape gains `commands_output?` and `formatHookResultJson` always emits `commands_output` (defaulting to `[]`).
+
+### Documentation
+
+- **`.gitignore`, `README.md`** (W1124 / canonical v1.25.0+v1.27.0 hygiene; W1096 N/A) — both hook state artifacts (`.stride-changed-files.json`, `.stride-diff-upload-state`) are gitignored, with README paragraphs explaining the rationale and the `after_doing` time budget. The README **explicitly marks canonical W1096's `hooks.json` 120s→300s timeout bump as N/A for stride-opencode** — there is no `hooks.json`; hooks run inside the OpenCode `tool.execute.before`/`after` handlers, so the budget is host-controlled.
+
+### Notes on v1.28.0 parity
+
+Canonical v1.28.0 (G224 / W1086+W1087) made the bash plugin **always refresh `TASK_BASE_REF` at claim time** because oversized claim responses could skip the `.stride-env-cache` file refresh and leave a stale base ref. **This is structurally inherent in the OpenCode variant and needs no port:** `captureBaseRef()` recomputes the base ref from `git HEAD` on every claim and writes it to the in-memory `envCache` — there is no on-disk env cache to go stale.
+
+### Backward compatibility
+
+Additive. The TypeScript changes are behavior-preserving for the happy path (every prior test still passes; suite grows to 157/0). `reviewer_result` is persisted verbatim by the Kanban server (`:jsonb`), so the expanded review-report fields flow through with no consumer edit. No `.stride.md` or `.stride_auth.md` changes are required; `.gitignore` gains two transient-artifact entries. `bun install` your updated plugin and re-copy the `skills/`, `agents/`, and `src/` outputs into your `.opencode/` paths. No marketplace pin update — stride-opencode is not distributed through stride-marketplace; consumers install directly from this repository by tag (`npm install opencode-stride`).
+
+### Source
+
+Goal **G232** — the OpenCode TypeScript port of canonical stride v1.24.0–v1.28.0. Tasks: W1122 (G222 review-completeness), W1123 (W1093/W1094 diff-upload survives timeout), D75 (D67 exclude state artifacts), D76 (D65 passing-gate output → `commands_output`), D77 (D66 verbatim acceptance-criteria restatement), W1124 (gitignore artifacts + time-budget docs).
+
 ## [1.15.0] - 2026-06-08
 
 Parity release: brings the OpenCode variant to G220/G219 parity for the reviewer `project_checks` `not_applicable` status and full-checklist emission (canonical: stride v1.23.0, commit a4e7e6f, W1057). Feature minor (1.14.0 → 1.15.0).
