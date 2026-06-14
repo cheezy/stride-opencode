@@ -229,6 +229,71 @@ describe("captureChangedFiles — base ref fallback", () => {
   });
 });
 
+describe("captureChangedFiles — D67 root-artifact exclusion", () => {
+  it("excludes an untracked .stride-diff-upload-state / .stride-changed-files.json while keeping a real change", async () => {
+    const { dir, base } = await initRepo();
+    try {
+      writeFileSync(join(dir, "a.txt"), "changed\n");
+      writeFileSync(join(dir, ".stride-diff-upload-state"), "task_id=42\nhttp_code=200\n");
+      writeFileSync(join(dir, ".stride-changed-files.json"), "[]\n");
+      const result = await captureChangedFiles($, dir, base);
+      const paths = result.map((f) => f.path);
+      expect(paths).toContain("a.txt");
+      expect(paths).not.toContain(".stride-diff-upload-state");
+      expect(paths).not.toContain(".stride-changed-files.json");
+    } finally {
+      cleanup(dir);
+    }
+  });
+
+  it("excludes a COMMITTED-and-modified state file (the auto-commit case)", async () => {
+    const { dir } = await initRepo();
+    try {
+      writeFileSync(join(dir, ".stride-diff-upload-state"), "task_id=1\nhttp_code=200\n");
+      await $`git add -A`.cwd(dir).quiet();
+      await $`git commit -q -m "state committed"`.cwd(dir).quiet();
+      const base = (await $`git rev-parse HEAD`.cwd(dir).quiet()).stdout.toString().trim();
+      writeFileSync(join(dir, ".stride-diff-upload-state"), "task_id=2\nhttp_code=200\n");
+      writeFileSync(join(dir, "a.txt"), "v2\n");
+      await $`git add -A`.cwd(dir).quiet();
+      await $`git commit -q -m "v2"`.cwd(dir).quiet();
+      const result = await captureChangedFiles($, dir, base);
+      const paths = result.map((f) => f.path);
+      expect(paths).toContain("a.txt");
+      expect(paths).not.toContain(".stride-diff-upload-state");
+    } finally {
+      cleanup(dir);
+    }
+  });
+
+  it("anchors to the repo root — a same-named file in a subdirectory is still captured", async () => {
+    const { dir, base } = await initRepo();
+    try {
+      mkdirSync(join(dir, "sub"));
+      writeFileSync(join(dir, "sub", ".stride-diff-upload-state"), "user data\n");
+      writeFileSync(join(dir, "sub", ".stride-changed-files.json"), "user snapshot\n");
+      const result = await captureChangedFiles($, dir, base);
+      const paths = result.map((f) => f.path);
+      expect(paths).toContain("sub/.stride-diff-upload-state");
+      expect(paths).toContain("sub/.stride-changed-files.json");
+    } finally {
+      cleanup(dir);
+    }
+  });
+
+  it("yields [] when the hook's own artifacts are the only changed paths", async () => {
+    const { dir, base } = await initRepo();
+    try {
+      writeFileSync(join(dir, ".stride-diff-upload-state"), "task_id=9\nhttp_code=200\n");
+      writeFileSync(join(dir, ".stride-changed-files.json"), "[]\n");
+      const result = await captureChangedFiles($, dir, base);
+      expect(result).toEqual([]);
+    } finally {
+      cleanup(dir);
+    }
+  });
+});
+
 describe("extractApiBase / extractToken", () => {
   it("pulls https URL out of a /complete curl", () => {
     const cmd = 'curl -X PATCH https://stride.example.com/api/tasks/42/complete -H "Authorization: Bearer test_token_abc123"';

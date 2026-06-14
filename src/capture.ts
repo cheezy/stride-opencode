@@ -91,12 +91,23 @@ export async function captureChangedFiles(
   const trackedList = splitLines(tracked);
   const untrackedSet = new Set(splitLines(untracked));
 
+  // (D67) Exclude the hook's OWN root bookkeeping artifacts from the snapshot:
+  // .stride-diff-upload-state and .stride-changed-files.json otherwise pass both
+  // the tracked-diff and untracked-not-gitignored nets and leak into a task's
+  // changed_files. git emits repo-root-relative paths, so an exact-equality
+  // match is anchored to the repo root — a same-named file in a subdirectory
+  // (e.g. sub/.stride-diff-upload-state) keeps its path prefix and is captured.
+  const ROOT_ARTIFACTS = new Set([
+    ".stride-diff-upload-state",
+    ".stride-changed-files.json",
+  ]);
+
   // Dedupe by path (tracked and untracked should not overlap, but the Set
   // makes the single-entry-per-path invariant explicit)
   const allPaths: string[] = [];
   const seen = new Set<string>();
   for (const p of [...trackedList, ...untrackedSet]) {
-    if (p && !seen.has(p)) {
+    if (p && !ROOT_ARTIFACTS.has(p) && !seen.has(p)) {
       seen.add(p);
       allPaths.push(p);
     }
