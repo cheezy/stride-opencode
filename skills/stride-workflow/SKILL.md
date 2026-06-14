@@ -269,6 +269,8 @@ Follow:
 
 **If the `task-reviewer` custom agent is available**, invoke it with the git diff of all your changes AND **every review field the task supplies — NO EXCEPTIONS, never a subset:** `acceptance_criteria`, `pitfalls`, `patterns_to_follow`, `testing_strategy`, `security_considerations`, `description`, `what`, and `why`. This input list is owned by the reviewer's contract — keep it in sync with the "You will receive" line in `agents/task-reviewer.md` and Phase 3 of `stride-subagent-workflow`; do not maintain a shorter list here. Omitting a supplied field (most often `security_considerations`) is the D60 defect where a task's security considerations came back `not_assessed`.
 
+**Re-review and follow-up rounds — preserve the canonical criteria list (D66).** When you re-invoke the `task-reviewer` agent to re-verify after fixing issues from a `changes_requested` round, the follow-up invocation MUST pass the task's `acceptance_criteria` field **unchanged** and instruct the reviewer to keep its `acceptance_criteria` array **identical to the task's canonical list** — one entry per criterion line, verbatim and in the task's order, never split, merged, reworded, added, or dropped (the same 1:1 hard rule the reviewer schema enforces in `agents/task-reviewer.md`). Never hand the re-review only the issues you fixed and let it re-derive the criteria: a re-review that re-enumerates the criteria in its own words corrupts the persisted count — this is exactly how a re-review round turned a 5-criterion task into a `6/5` review display.
+
 The reviewer returns a human-readable prose summary followed by a fenced ```json block. The schema of that block is owned by `stride/agents/task-reviewer.md` — do not duplicate field definitions here.
 
 - **Fix all Critical issues** before proceeding
@@ -308,6 +310,21 @@ for (const section of Object.keys(structured)) {
 }
 if ((reviewer_result.project_checks ?? []).length !== (structured.project_checks ?? []).length) {
   throw new Error("project_checks count must equal what the reviewer emitted — never trim or sub-select");
+}
+
+// (D66) Acceptance-criteria 1:1 check — reviewer_result.acceptance_criteria MUST
+// have exactly one entry per criterion line of the TASK's own acceptance_criteria.
+// A mismatch means the reviewer split, merged, added, or dropped criteria (the
+// 6/5 defect). Do NOT truncate or pad the array to force the count — re-invoke
+// the reviewer with the task's canonical criteria list unchanged (see the
+// re-review rule above), then re-check.
+const taskCriterionLines = (task.acceptance_criteria ?? "")
+  .split("\n")
+  .filter((line) => line.trim());
+if (structured.acceptance_criteria.length !== taskCriterionLines.length) {
+  throw new Error(
+    "acceptance_criteria count must equal the task's criterion-line count — re-invoke the reviewer, do not truncate or pad",
+  );
 }
 ```
 
