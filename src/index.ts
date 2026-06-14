@@ -35,10 +35,20 @@ const CLAIM_PATTERN = /\/api\/tasks\/claim/;
 const COMPLETE_PATTERN = /\/api\/tasks\/[^/]+\/complete/;
 const MARK_REVIEWED_PATTERN = /\/api\/tasks\/[^/]+\/mark_reviewed/;
 
+interface CommandOutput {
+  command: string;
+  stdout: string;
+  stderr: string;
+}
+
 interface HookResult {
   hook: HookName;
   status: "success" | "failed" | "skipped";
   commands_completed: string[];
+  // (D65) Per-command tail-truncated output on the success path. Folded into the
+  // success JSON instead of being written to process.stderr, so a passing gate
+  // is never rendered as a hook error by a host that treats stderr as failure.
+  commands_output?: CommandOutput[];
   commands_remaining?: string[];
   failed_command?: string;
   command_index?: number;
@@ -359,6 +369,7 @@ export const StridePlugin: Plugin = async ({
   ): Promise<HookResult> {
     const startTime = Date.now();
     const completed: string[] = [];
+    const outputs: CommandOutput[] = [];
 
     for (let i = 0; i < commands.length; i++) {
       const cmd = commands[i];
@@ -367,13 +378,16 @@ export const StridePlugin: Plugin = async ({
           await $`cd ${projectDir} && ${envToExport(envCache)}${cmd}`.quiet();
         completed.push(cmd);
 
-        // Log stdout/stderr to debug
-        if (result.stdout.toString().trim()) {
-          process.stderr.write(result.stdout);
-        }
-        if (result.stderr.toString().trim()) {
-          process.stderr.write(result.stderr);
-        }
+        // (D65) Do NOT write the passing command's output to process.stderr — a
+        // host that renders hook stderr as an error would mislabel a passing
+        // gate. Instead fold a tail-truncated copy (same 2000-char cap as the
+        // failure path) into commands_output on the success JSON. The TS JSON
+        // serializer encodes it, so command output cannot inject JSON fields.
+        outputs.push({
+          command: cmd,
+          stdout: result.stdout.toString().slice(-2000),
+          stderr: result.stderr.toString().slice(-2000),
+        });
       } catch (err: unknown) {
         const duration = Date.now() - startTime;
         const exitCode =
@@ -408,6 +422,7 @@ export const StridePlugin: Plugin = async ({
       hook: hookName,
       status: "success",
       commands_completed: completed,
+      commands_output: outputs,
       duration_ms: Date.now() - startTime,
     };
   }
@@ -446,6 +461,8 @@ export const StridePlugin: Plugin = async ({
       hook: result.hook,
       status: "success",
       commands_completed: result.commands_completed,
+      // (D65) Per-command output folded into the success JSON instead of stderr.
+      commands_output: result.commands_output ?? [],
       duration_ms: result.duration_ms,
     });
   }

@@ -721,3 +721,133 @@ describe("StridePlugin — W1093 early capture + W1094 self-heal", () => {
     }
   });
 });
+
+// --- StridePlugin D65: passing-gate output off stderr, folded into commands_output ---
+//
+// NOTE: opencode's executeCommands interpolates the command into a bun `$`
+// template; bun shell-escapes the interpolation, so only single-token commands
+// run cleanly in-process (a pre-existing limitation unrelated to D65). These
+// tests use `pwd` (succeeds, emits output) and `false` (exits 1) and skip the
+// claim step so envCache stays empty.
+
+describe("StridePlugin — D65 passing-gate output → commands_output (off stderr)", () => {
+  const originalFetch = globalThis.fetch;
+  beforeEach(() => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (globalThis as any).fetch = async () => new Response("", { status: 200 });
+  });
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  async function initRepo(): Promise<string> {
+    const dir = mkdtempSync(join(tmpdir(), "stride-oc-d65-"));
+    await $`git init -q`.cwd(dir).quiet();
+    await $`git config user.email "test@test.local"`.cwd(dir).quiet();
+    await $`git config user.name "Test"`.cwd(dir).quiet();
+    writeFileSync(join(dir, "tracked.txt"), "v1\n");
+    await $`git add -A`.cwd(dir).quiet();
+    await $`git commit -q -m v1`.cwd(dir).quiet();
+    return dir;
+  }
+  function cleanup(dir: string): void {
+    try { rmSync(dir, { recursive: true, force: true }); } catch { /* best-effort */ }
+  }
+  async function instantiate(dir: string) {
+    return (await StridePlugin({ directory: dir, worktree: dir, $ } as never)) as {
+      "tool.execute.before": (i: unknown, o?: unknown) => Promise<void>;
+      "tool.execute.after": (i: unknown, o?: unknown) => Promise<void>;
+    };
+  }
+
+  it("D65: a passing after_doing gate writes its output nowhere on process.stderr", async () => {
+    const dir = await initRepo();
+    const origWrite = process.stderr.write.bind(process.stderr);
+    let captured = "";
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (process.stderr as any).write = (chunk: unknown) => {
+      captured += String(chunk);
+      return true;
+    };
+    try {
+      // No claim ⇒ empty envCache ⇒ the single-token gate command runs and
+      // succeeds. `pwd` emits the repo dir on stdout — which must NOT leak to
+      // stderr now that D65 folds it into commands_output instead.
+      const hooks = await instantiate(dir);
+      writeFileSync(join(dir, ".stride.md"), "## after_doing\n\n```bash\npwd\n```\n");
+      await hooks["tool.execute.before"]({
+        input: { command: 'curl -X PATCH http://localhost/api/tasks/42/complete -H "Authorization: Bearer tok"' },
+      });
+      expect(captured).not.toContain(dir);
+    } finally {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (process.stderr as any).write = origWrite;
+      cleanup(dir);
+    }
+  });
+
+  it("D65: passing-command output is folded into commands_output on the success JSON", async () => {
+    const dir = await initRepo();
+    const origOut = process.stdout.write.bind(process.stdout);
+    let stdoutCap = "";
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (process.stdout as any).write = (chunk: unknown) => {
+      stdoutCap += String(chunk);
+      return true;
+    };
+    try {
+      // The after_goal path is the only place a success HookResult is serialized
+      // to stdout, so it's where commands_output is observable. Empty envCache ⇒
+      // the single-token `pwd` after_goal command succeeds and emits output.
+      const hooks = await instantiate(dir);
+      writeFileSync(join(dir, ".stride.md"), "## after_goal\n\n```bash\npwd\n```\n");
+      const response = JSON.stringify({ hooks: [{ name: "after_goal" }] });
+      await hooks["tool.execute.after"](
+        { input: { command: "curl -X PATCH http://localhost/api/tasks/42/complete" } },
+        response,
+      );
+      const line = stdoutCap.split("\n").find((l) => l.includes('"hook":"after_goal"'));
+      expect(line).toBeDefined();
+      const parsed = JSON.parse(line as string);
+      expect(parsed.status).toBe("success");
+      expect(Array.isArray(parsed.commands_output)).toBe(true);
+      expect(parsed.commands_output[0].command).toBe("pwd");
+      expect(parsed.commands_output[0].stdout).toContain(dir);
+      expect(parsed.commands_output[0].stderr).toBe("");
+      // No top-level stderr field on the success shape.
+      expect(parsed.stderr).toBeUndefined();
+    } finally {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (process.stdout as any).write = origOut;
+      cleanup(dir);
+    }
+  });
+
+  it("D65: the failure path is unchanged (failed JSON keeps stdout/stderr, no commands_output)", async () => {
+    const dir = await initRepo();
+    const origOut = process.stdout.write.bind(process.stdout);
+    let stdoutCap = "";
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (process.stdout as any).write = (chunk: unknown) => { stdoutCap += String(chunk); return true; };
+    try {
+      // `false` is a single token that exits 1 ⇒ the failure branch is taken.
+      const hooks = await instantiate(dir);
+      writeFileSync(join(dir, ".stride.md"), "## after_goal\n\n```bash\nfalse\n```\n");
+      const response = JSON.stringify({ hooks: [{ name: "after_goal" }] });
+      await hooks["tool.execute.after"](
+        { input: { command: "curl -X PATCH http://localhost/api/tasks/42/complete" } },
+        response,
+      );
+      const line = stdoutCap.split("\n").find((l) => l.includes('"hook":"after_goal"'));
+      expect(line).toBeDefined();
+      const parsed = JSON.parse(line as string);
+      expect(parsed.status).toBe("failed");
+      expect(parsed.exit_code).toBe(1);
+      expect("commands_output" in parsed).toBe(false);
+    } finally {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (process.stdout as any).write = origOut;
+      cleanup(dir);
+    }
+  });
+});
