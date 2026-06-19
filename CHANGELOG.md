@@ -5,6 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.17.0] - 2026-06-19
+
+Documentation parity release: brings the OpenCode variant to parity with canonical **stride v1.29.0** (G225, the `technical_details` documentation rollout). Delivered under tasks W1188, W1189, W1190, W1191. Feature minor (1.16.0 → 1.17.0).
+
+### Added — the `technical_details` task field is now documented across the plugin
+
+`technical_details` is an **optional, free-form JSON object** a task may carry to hold any additional technical context that does not fit the structured fields — data shapes, gotchas, key decisions, reference links. Unlike `testing_strategy`, it has **no fixed keys**: a task author or enricher uses whatever keys best describe the work, and leaves it as `{}` when there is nothing substantive to record. It is **not** one of the five review_queue-scored fields (`acceptance_criteria`, `testing_strategy`, `security_considerations`, `pitfalls`, `patterns_to_follow`), so a blank value is never a scoring gap. The plugin previously had no documentation for this field; agents now have one consistent definition to follow.
+
+- **`skills/stride-creating-tasks/SKILL.md`** (W1188) — documents `technical_details` in the Field Quick Reference table, the complete-task example, and the Embedded Object Formats section (as a free-form object, explicitly contrasted with `testing_strategy`, which has fixed `valid_keys`).
+- **`skills/stride-creating-goals/SKILL.md`** (W1188) — notes that nested tasks MAY carry an optional free-form `technical_details` object and that it is not a review_queue-scored field.
+- **`agents/task-enricher.md` + `skills/stride-enriching-tasks/SKILL.md`** (W1189) — add `technical_details` to the enrichment guidance as an optional field the enricher MAY populate from discovered context — never fabricated, left as `{}` otherwise — with a no-secrets reminder since the object is free-form.
+- **`agents/task-decomposer.md`** (W1189) — notes that a decomposed task MAY include an optional `technical_details` object.
+- **`skills/stride-workflow/SKILL.md`** (W1190) — adds `technical_details` to the Step 1 task-field review list (optional free-form context; not a scored field).
+- **`agents/task-explorer.md`** (W1190) — the explorer folds any recorded `technical_details` into its summary so implementation benefits from it.
+
+### Backward compatibility
+
+Documentation-only. No `src/` (TypeScript), wire-shape, hook, `.stride.md`, or `.stride_auth.md` changes; `technical_details` is optional everywhere it appears and is never added to any scored-field set. Tasks that omit it behave exactly as before. No marketplace pin update — stride-opencode is not distributed through stride-marketplace; consumers install directly from this repository by tag (`npm install opencode-stride`).
+
+### Source
+
+Tasks W1188 (creation contracts), W1189 (enrichment + decomposition), W1190 (workflow + exploration surfacing), W1191 (this release-notes/version task). Ports canonical stride G225 (v1.29.0) / G243 (W1179–W1182).
+
 ## [1.16.0] - 2026-06-14
 
 Bundled parity release: brings the OpenCode variant to parity with canonical **stride v1.24.0–v1.28.0**. Delivered under goal **G232** (tasks W1122, W1123, D75, D76, D77, W1124). Feature minor (1.15.0 → 1.16.0).

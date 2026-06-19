@@ -205,6 +205,8 @@ stride-enriching-tasks           ← WHEN a task has empty key_files/testing_str
 
 Each skill's frontmatter has a `name` (1–64 chars, lowercase alphanumeric with hyphens) matching its directory name and a `description` (1–1024 chars) that OpenCode surfaces in the `skill` tool listing so the agent can pick the right one.
 
+The `stride-creating-tasks`, `stride-enriching-tasks`, and `stride-workflow` skills also document the optional `technical_details` task field — a free-form JSON object (no fixed keys) for any extra technical context (data shapes, gotchas, decisions, links). It is optional everywhere and is **not** one of the five review_queue-scored fields, so a blank value is never a scoring gap.
+
 ## Subagents
 
 | Agent | Mode | Purpose |
