@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.18.0] - 2026-06-20
+
+Documentation parity release: brings the OpenCode variant to parity with canonical **stride v1.30.0** (G254, the `created_by_agent` creation-skill documentation). Delivered under task W1232. Feature minor (1.17.0 → 1.18.0).
+
+### Added — the creation skills now document `created_by_agent`
+
+Agent-created tasks previously landed with `created_by_agent` nil, so the `/agents` activity feed rendered an uninformative `?` avatar on every `created` row. The creation skills now document the field on the create request bodies:
+
+- **`skills/stride-creating-tasks/SKILL.md`** — `created_by_agent` added to the complete-task example, the Field Quick Reference table (string, create-only, forbidden on `PATCH`), and an explanatory note: set it to the plugin's own agent name (`"OpenCode"` — the exact value sent as `agent_name` on claim/complete), never the `ai_agent:<model>` token form, so one agent stays one roster identity.
+- **`skills/stride-creating-goals/SKILL.md`** — `created_by_agent` added to the batch goal example with a note that the server propagates the goal's value to every nested child task.
+
+Documentation-only: no wire-shape, hook, or auth change; `created_by_agent` is optional on create, was already accepted by the API, and is forbidden on `PATCH`. stride-opencode is not distributed through a marketplace, so there is no marketplace pin to update.
+
 ## [1.17.0] - 2026-06-19
 
 Documentation parity release: brings the OpenCode variant to parity with canonical **stride v1.29.0** (G225, the `technical_details` documentation rollout). Delivered under tasks W1188, W1189, W1190, W1191. Feature minor (1.16.0 → 1.17.0).
