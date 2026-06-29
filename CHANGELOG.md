@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.19.0] - 2026-06-29
+
+### Added — `create-tasks`/`create-goals` now have an explicit terminal state, plus a Backlog claim-fail guard (G284 / W1401)
+
+In OpenCode build mode (autonomous), the `/stride:create-tasks` and `/stride:create-goals` commands could create a task and then fall straight through the `stride-workflow` orchestrator's build loop — auto-claiming and building the just-created task. The claim fails because newly created tasks sit in the Backlog (not Ready), and the agent would then build the work outside the Stride lifecycle (no claim, no hooks, no completion record). The orchestrator had no terminal state for the create intent, unlike `stride-ideation` which stops at the written document.
+
+- **`skills/stride-workflow/SKILL.md`** — Added a **Creation Terminal State** section: on a `create-tasks`/`create-goals` intent the orchestrator now reports the created identifiers, clears the activation marker (`$PROJECT_DIR/.stride/.orchestrator_active`), and STOPS without entering Task Discovery, claiming, or implementation. Added a **Backlog Claim-Fail Guard**: a failed claim (Backlog / already-claimed / blocked) is a terminal stop, never a fallback to building outside the lifecycle. The build loop (Steps 1–9) is unchanged.
+- **`commands/create-tasks.md`**, **`commands/create-goals.md`** — Added a `## Terminal state` section: the command's terminal state is "tasks/goal created," not built; building is a separate `/stride-build`.
+- **`skills/stride-creating-tasks/SKILL.md`**, **`skills/stride-creating-goals/SKILL.md`** — Added a `## Terminal state` note.
+
+### Backward compatibility
+
+Documentation/skill-text only. No `src/` change (the test suite is unchanged at 157 passing), no `.stride.md`/hook/wire-shape change. The build loop is unchanged; only the create-intent path gains an explicit stop.
+
 ## [1.18.0] - 2026-06-20
 
 Documentation parity release: brings the OpenCode variant to parity with canonical **stride v1.30.0** (G254, the `created_by_agent` creation-skill documentation). Delivered under task W1232. Feature minor (1.17.0 → 1.18.0).
