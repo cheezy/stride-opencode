@@ -2,6 +2,11 @@ import type { Plugin } from "@opencode-ai/plugin";
 import { parseStrideMd, buildCommandList, type HookName } from "./parser";
 import { gateToolCall } from "./skill-gate";
 import {
+  executeHookCommands,
+  resolveHookTimeoutMs,
+  type HookResult,
+} from "./hook-exec";
+import {
   captureChangedFiles,
   resolveStrideApiUrl,
   resolveStrideApiToken,
@@ -28,6 +33,16 @@ export {
   MAX_LINES,
   type ChangedFile,
 } from "./capture";
+export {
+  executeHookCommands,
+  resolveHookTimeoutMs,
+  HOOK_TIMEOUTS_MS,
+  KILL_GRACE_MS,
+  TIMEOUT_EXIT_CODE,
+  type HookResult,
+  type CommandOutput,
+  type ExecOptions,
+} from "./hook-exec";
 
 // --- Stride API call detection ---
 
@@ -35,28 +50,6 @@ const CLAIM_PATTERN = /\/api\/tasks\/claim/;
 const COMPLETE_PATTERN = /\/api\/tasks\/[^/]+\/complete/;
 const MARK_REVIEWED_PATTERN = /\/api\/tasks\/[^/]+\/mark_reviewed/;
 
-interface CommandOutput {
-  command: string;
-  stdout: string;
-  stderr: string;
-}
-
-interface HookResult {
-  hook: HookName;
-  status: "success" | "failed" | "skipped";
-  commands_completed: string[];
-  // (D65) Per-command tail-truncated output on the success path. Folded into the
-  // success JSON instead of being written to process.stderr, so a passing gate
-  // is never rendered as a hook error by a host that treats stderr as failure.
-  commands_output?: CommandOutput[];
-  commands_remaining?: string[];
-  failed_command?: string;
-  command_index?: number;
-  exit_code?: number;
-  stdout?: string;
-  stderr?: string;
-  duration_ms: number;
-}
 
 interface EnvCache {
   [key: string]: string;
@@ -230,11 +223,15 @@ export function responseHasAfterGoal(output: unknown): boolean {
 
 // --- Plugin export ---
 
-export const StridePlugin: Plugin = async ({
-  directory,
-  worktree,
-  $,
-}) => {
+export const StridePlugin: Plugin = async (input) => {
+  const { directory, worktree, $ } = input;
+  // (W1495) Test-only injection: PluginInput is a closed type, so tiny hook
+  // budgets and kill-grace ride in via the same `as never` cast the tests
+  // already use to instantiate the plugin.
+  const { hookTimeoutsMs, killGraceMs } = input as unknown as {
+    hookTimeoutsMs?: Partial<Record<HookName, number>>;
+    killGraceMs?: number;
+  };
   const projectDir = worktree || directory;
   let envCache: EnvCache = {};
   const snapshotPath = `${projectDir}/.stride-changed-files.json`;
@@ -367,79 +364,23 @@ export const StridePlugin: Plugin = async ({
     hookName: HookName,
     commands: string[],
   ): Promise<HookResult> {
-    const startTime = Date.now();
-    const completed: string[] = [];
-    const outputs: CommandOutput[] = [];
-
     // (D95) The env cache rides the child environment, never shell text, so
     // user-controlled values (e.g. task titles) cannot inject shell syntax.
-    // process.env is filtered because .env() rejects undefined values.
+    // process.env is filtered because undefined values are not env data.
     const childEnv: Record<string, string> = {};
     for (const [k, v] of Object.entries(process.env)) {
       if (v !== undefined) childEnv[k] = v;
     }
     Object.assign(childEnv, envCache);
 
-    for (let i = 0; i < commands.length; i++) {
-      const cmd = commands[i];
-      try {
-        // (D95) Run each line through `sh -c` so shell parsing (multi-token
-        // commands, &&, pipes, redirects) happens in a real shell — Bun's
-        // template interpolation single-token-escapes ${cmd}, which is exactly
-        // right here: the whole line becomes sh's single -c argument.
-        const result = await $`sh -c ${cmd}`
-          .cwd(projectDir)
-          .env(childEnv)
-          .quiet();
-        completed.push(cmd);
-
-        // (D65) Do NOT write the passing command's output to process.stderr — a
-        // host that renders hook stderr as an error would mislabel a passing
-        // gate. Instead fold a tail-truncated copy (same 2000-char cap as the
-        // failure path) into commands_output on the success JSON. The TS JSON
-        // serializer encodes it, so command output cannot inject JSON fields.
-        outputs.push({
-          command: cmd,
-          stdout: result.stdout.toString().slice(-2000),
-          stderr: result.stderr.toString().slice(-2000),
-        });
-      } catch (err: unknown) {
-        const duration = Date.now() - startTime;
-        const exitCode =
-          err && typeof err === "object" && "exitCode" in err
-            ? (err as { exitCode: number }).exitCode
-            : 1;
-        const stdout =
-          err && typeof err === "object" && "stdout" in err
-            ? (err as { stdout: Buffer }).stdout.toString().slice(-2000)
-            : "";
-        const stderr =
-          err && typeof err === "object" && "stderr" in err
-            ? (err as { stderr: Buffer }).stderr.toString().slice(-2000)
-            : String(err);
-
-        return {
-          hook: hookName,
-          status: "failed",
-          commands_completed: completed,
-          commands_remaining: commands.slice(i + 1),
-          failed_command: cmd,
-          command_index: i,
-          exit_code: exitCode,
-          stdout,
-          stderr,
-          duration_ms: duration,
-        };
-      }
-    }
-
-    return {
-      hook: hookName,
-      status: "success",
-      commands_completed: completed,
-      commands_output: outputs,
-      duration_ms: Date.now() - startTime,
-    };
+    // (W1495) Execution — sh -c per line, section budget, group-kill on
+    // expiry — lives in hook-exec.ts.
+    return executeHookCommands(hookName, commands, {
+      cwd: projectDir,
+      env: childEnv,
+      budgetMs: resolveHookTimeoutMs(hookName, hookTimeoutsMs),
+      killGraceMs,
+    });
   }
 
   // Serialize a HookResult into the JSON shape stride-hook.sh emits on stdout
@@ -455,6 +396,10 @@ export const StridePlugin: Plugin = async ({
         failed_command: result.failed_command,
         command_index: result.command_index,
         exit_code: result.exit_code,
+        // (W1495) Mirrors the bash hook's timed_out/budget_seconds failure
+        // fields, in ms to match duration_ms.
+        timed_out: result.timed_out ?? false,
+        budget_ms: result.budget_ms,
         stdout: result.stdout,
         stderr: result.stderr,
         commands_completed: result.commands_completed,
@@ -526,6 +471,8 @@ export const StridePlugin: Plugin = async ({
             failed_command: result.failed_command,
             command_index: result.command_index,
             exit_code: result.exit_code,
+            timed_out: result.timed_out ?? false,
+            budget_ms: result.budget_ms,
             stdout: result.stdout,
             stderr: result.stderr,
             commands_completed: result.commands_completed,
@@ -596,9 +543,17 @@ export const StridePlugin: Plugin = async ({
         const result = await executeCommands(hookName, commands);
         if (result.status === "failed") {
           primarySucceeded = false;
-          process.stderr.write(
-            `Stride ${hookName} hook failed: ${result.failed_command}\n`,
-          );
+          // (W1495) Distinguish a timeout from an ordinary failure, mirroring
+          // the bash hook's dual stderr phrasing.
+          if (result.timed_out) {
+            process.stderr.write(
+              `Stride ${hookName} hook command ${(result.command_index ?? 0) + 1}/${commands.length} timed out after ${Math.ceil((result.budget_ms ?? 0) / 1000)}s budget: ${result.failed_command}\n`,
+            );
+          } else {
+            process.stderr.write(
+              `Stride ${hookName} hook failed: ${result.failed_command}\n`,
+            );
+          }
           if (result.stderr) {
             process.stderr.write(result.stderr + "\n");
           }

@@ -1060,3 +1060,145 @@ describe("StridePlugin — D95 sh -c command execution", () => {
     }
   });
 });
+
+// --- StridePlugin W1495: per-hook timeout enforcement ---
+//
+// The plugin factory accepts test-only hookTimeoutsMs/killGraceMs overrides
+// (via the same `as never` cast the other describes use) so hanging gate
+// commands time out in milliseconds instead of the canonical 60s/120s.
+
+describe("StridePlugin — W1495 per-hook timeout enforcement", () => {
+  const originalFetch = globalThis.fetch;
+  let putCalls: string[] = [];
+  beforeEach(() => {
+    putCalls = [];
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (globalThis as any).fetch = async (url: string) => {
+      if (typeof url === "string" && url.includes("/changed_files")) {
+        putCalls.push(url);
+      }
+      return new Response("", { status: 200 });
+    };
+  });
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  async function initRepo(): Promise<string> {
+    const dir = mkdtempSync(join(tmpdir(), "stride-oc-w1495-"));
+    await $`git init -q`.cwd(dir).quiet();
+    await $`git config user.email "test@test.local"`.cwd(dir).quiet();
+    await $`git config user.name "Test"`.cwd(dir).quiet();
+    writeFileSync(join(dir, "tracked.txt"), "v1\n");
+    await $`git add -A`.cwd(dir).quiet();
+    await $`git commit -q -m v1`.cwd(dir).quiet();
+    return dir;
+  }
+  function cleanup(dir: string): void {
+    try { rmSync(dir, { recursive: true, force: true }); } catch { /* best-effort */ }
+  }
+  async function instantiate(
+    dir: string,
+    hookTimeoutsMs: Record<string, number>,
+  ) {
+    return (await StridePlugin({
+      directory: dir,
+      worktree: dir,
+      $,
+      hookTimeoutsMs,
+      killGraceMs: 100,
+    } as never)) as {
+      "tool.execute.before": (i: unknown, o?: unknown) => Promise<void>;
+      "tool.execute.after": (i: unknown, o?: unknown) => Promise<void>;
+    };
+  }
+
+  const CLAIM_CMD = "curl -X POST http://localhost/api/tasks/claim";
+  const COMPLETE_CMD =
+    'curl -X PATCH http://localhost/api/tasks/42/complete -H "Authorization: Bearer tok"';
+  const CLAIM_RESPONSE = JSON.stringify({
+    data: { id: 42, identifier: "W42", title: "T", status: "in_progress" },
+  });
+
+  it("W1495: a hanging after_doing gate throws the structured timeout failure and keeps the early diff capture", async () => {
+    const dir = await initRepo();
+    try {
+      const hooks = await instantiate(dir, { after_doing: 150 });
+      await hooks["tool.execute.after"]({ input: { command: CLAIM_CMD } }, CLAIM_RESPONSE);
+      putCalls = [];
+      writeFileSync(join(dir, ".stride.md"), "## after_doing\n\n```bash\nsleep 5\n```\n");
+      let message = "";
+      try {
+        await hooks["tool.execute.before"]({ input: { command: COMPLETE_CMD } });
+      } catch (err) {
+        message = (err as Error).message;
+      }
+      expect(message).not.toBe("");
+      const parsed = JSON.parse(message);
+      expect(parsed.hook).toBe("after_doing");
+      expect(parsed.status).toBe("failed");
+      expect(parsed.timed_out).toBe(true);
+      expect(parsed.exit_code).toBe(124);
+      expect(parsed.failed_command).toBe("sleep 5");
+      expect(parsed.command_index).toBe(0);
+      expect(parsed.budget_ms).toBe(150);
+      // (W1093) The early diff capture ran BEFORE the gate hung — a timed-out
+      // gate must not lose the changed-files upload.
+      expect(existsSync(join(dir, ".stride-changed-files.json"))).toBe(true);
+      expect(putCalls.length).toBe(1);
+    } finally {
+      cleanup(dir);
+    }
+  });
+
+  it("W1495: an after_goal timeout serializes timed_out and budget_ms in the failure JSON", async () => {
+    const dir = await initRepo();
+    try {
+      const hooks = await instantiate(dir, { after_goal: 150 });
+      writeFileSync(join(dir, ".stride.md"), "## after_goal\n\n```bash\nsleep 5\n```\n");
+      const origOut = process.stdout.write.bind(process.stdout);
+      let stdoutCap = "";
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (process.stdout as any).write = (chunk: unknown) => { stdoutCap += String(chunk); return true; };
+      try {
+        await hooks["tool.execute.after"](
+          { input: { command: COMPLETE_CMD } },
+          JSON.stringify({ hooks: [{ name: "after_goal" }] }),
+        );
+      } finally {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (process.stdout as any).write = origOut;
+      }
+      const line = stdoutCap.split("\n").find((l) => l.includes('"hook":"after_goal"'));
+      expect(line).toBeDefined();
+      const parsed = JSON.parse(line as string);
+      expect(parsed.status).toBe("failed");
+      expect(parsed.timed_out).toBe(true);
+      expect(parsed.budget_ms).toBe(150);
+      expect(parsed.exit_code).toBe(124);
+    } finally {
+      cleanup(dir);
+    }
+  });
+
+  it("W1495: a before_review timeout writes the timed-out stderr phrasing", async () => {
+    const dir = await initRepo();
+    try {
+      const hooks = await instantiate(dir, { before_review: 100 });
+      writeFileSync(join(dir, ".stride.md"), "## before_review\n\n```bash\nsleep 5\n```\n");
+      const origErr = process.stderr.write.bind(process.stderr);
+      let stderrCap = "";
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (process.stderr as any).write = (chunk: unknown) => { stderrCap += String(chunk); return true; };
+      try {
+        await hooks["tool.execute.after"]({ input: { command: COMPLETE_CMD } }, "");
+      } finally {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (process.stderr as any).write = origErr;
+      }
+      expect(stderrCap).toMatch(/timed out after 1s budget: sleep 5/);
+    } finally {
+      cleanup(dir);
+    }
+  });
+});
