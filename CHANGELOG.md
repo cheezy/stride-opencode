@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.22.0] - 2026-07-02
+
+### Added — the claim env cache is persisted to disk (W1496)
+
+The plugin kept `envCache` (`TASK_ID`, `TASK_IDENTIFIER`, `TASK_BASE_REF`, and friends) in module memory only. A host restart between claim and complete silently dropped it: hook commands ran without task env vars, the changed-files upload was skipped for want of `TASK_ID`, and the before_review self-heal could not run either.
+
+- **`src/capture.ts`** — new `ENV_CACHE_FILE` (`.stride-env-cache`, the same filename as the canonical bash hook; JSON format instead of shell-source) plus `writeEnvCache`/`readEnvCache`/`clearEnvCache` in the established best-effort IO style: writes swallow errors, reads degrade absent/malformed/wrong-shape files to `{}` and never throw, only string-valued entries of a plain JSON object are accepted. The filename joins the D67 `ROOT_ARTIFACTS` exclusion set so the cache never leaks into a task's `changed_files` (root-anchored: a same-named file in a subdirectory is still captured).
+- **`src/index.ts`** — the claim branch performs a **fresh** `envCache` assignment (not a merge — a prior task's leftover fields cannot survive into the new claim, mirroring the bash hook's truncating rewrite) and persists the fully-populated cache (including `TASK_BASE_REF`) after the stale-state clears, gated on a successful extraction. A `loadEnvCacheIfEmpty()` helper lazily rehydrates an empty in-memory cache from disk at the three read sites: `executeCommands` (every hook path including `after_goal`), `finalizeAfterDoing` (also reached on the empty-commands path), and `selfHealChangedFilesUpload`. `after_review` removes the cache file alongside the snapshot and upload-state files (the bash hook's after_goal carve-out is out of scope — opencode has always cleared unconditionally).
+- **`.gitignore`** / **`README.md`** — `.stride-env-cache` added to the ignore list and the "Gitignored state artifacts" stanza (task metadata only, **never the API token**; written at claim, reloaded after a restart, cleared at `after_review`).
+- **Tests** — a 5-test unit describe in `capture.test.ts` (round-trip with `$`/backtick/quote values plus a no-token assertion, absent → `{}`, malformed → `{}`, wrong shapes dropped, clear tolerates a missing file), the D67 describe extended for the new filename, and a 9-test restart describe in `index.test.ts` (claim writes metadata only; a fresh instance's after_doing PUTs with the original `TASK_ID` **and** `TASK_BASE_REF` — proven via two post-claim commits a `HEAD~1` fallback would miss; restart self-heal; after_review clears all three files; stale-cache overwrite; corrupt-cache degradation; mid-task deletion with memory winning; two-project isolation; byte-for-byte env delivery through a fresh instance).
+
+### Backward compatibility
+
+No wire-shape or hook-contract change. The only behavioral change beyond the new persistence is the claim's fresh-assignment semantics, which affects only the previously-untested corner where a second claim on one instance inherited leftover fields from the first. Feature minor (1.21.0 → 1.22.0).
+
+### Source
+
+W1496.
+
 ## [1.21.0] - 2026-07-02
 
 ### Added — per-hook timeout enforcement (W1495)
