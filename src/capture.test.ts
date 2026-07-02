@@ -15,6 +15,7 @@ import {
   writeEnvCache,
   readEnvCache,
   clearEnvCache,
+  PUT_TIMEOUT_MS,
   TRUNC_MARKER,
   BIN_PLACEHOLDER,
   MAX_LINES,
@@ -490,6 +491,60 @@ describe("putChangedFiles", () => {
     expect(await putChangedFiles(null, "tok", "42", [])).toBeNull();
     expect(await putChangedFiles("https://stride.example.com", null, "42", [])).toBeNull();
     expect(await putChangedFiles("https://stride.example.com", "tok", null, [])).toBeNull();
+  });
+
+  it("passes an abort timeout of roughly 10 seconds to the fetch (W1498)", async () => {
+    let seenSignal: unknown;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (globalThis as any).fetch = async (_url: string, init?: { signal?: unknown }) => {
+      seenSignal = init?.signal;
+      return new Response("", { status: 200 });
+    };
+    await putChangedFiles("https://stride.example.com", "tok", "42", []);
+    expect(seenSignal instanceof AbortSignal).toBe(true);
+    expect(PUT_TIMEOUT_MS).toBe(10_000);
+  });
+
+  it("maps a timed-out (aborted) fetch to the transport-failure path: 0, warning without the token (W1498)", async () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (globalThis as any).fetch = async () => {
+      throw new DOMException("The operation was aborted.", "AbortError");
+    };
+    const originalError = console.error;
+    let warned = "";
+    console.error = (msg: unknown) => {
+      warned += String(msg);
+    };
+    try {
+      const code = await putChangedFiles("https://stride.example.com", "tok", "42", []);
+      expect(code).toBe(0);
+      expect(warned).toContain("changed_files upload failed for task 42");
+      expect(warned).not.toContain("tok");
+    } finally {
+      console.error = originalError;
+    }
+  });
+
+  it("a timed-out attempt is recorded as http_code=0 so the self-heal retries (W1498)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "stride-put-timeout-"));
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (globalThis as any).fetch = async () => {
+      throw new DOMException("The operation was aborted.", "AbortError");
+    };
+    const originalError = console.error;
+    console.error = () => {};
+    try {
+      const code = await putChangedFiles("https://stride.example.com", "tok", "42", []);
+      expect(code).toBe(0);
+      await recordDiffUploadState(dir, "42", code as number);
+      const state = await readDiffUploadState(dir);
+      expect(state).toEqual({ taskId: "42", httpCode: "0" });
+      // The W1094 healthy short-circuit requires a 2xx — "0" must not match.
+      expect(/^2/.test((state as { httpCode: string }).httpCode)).toBe(false);
+    } finally {
+      console.error = originalError;
+      cleanup(dir);
+    }
   });
 });
 

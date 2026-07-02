@@ -357,8 +357,12 @@ export async function resolveStrideApiToken(
  * code — `0` on a transport failure, mirroring the bash twin's `'000'`. A
  * non-2xx response and any fetch error are surfaced as a stderr warning (never
  * the token) rather than being dropped — after_doing must remain
- * blocking-but-not-fragile, so we warn rather than throw.
+ * blocking-but-not-fragile, so we warn rather than throw. (W1498) The fetch
+ * carries an abort timeout so a hung server cannot stall the gate; an abort
+ * takes the same transport-failure path as any other fetch error.
  */
+export const PUT_TIMEOUT_MS = 10_000;
+
 export async function putChangedFiles(
   apiBase: string | null,
   token: string | null,
@@ -384,6 +388,11 @@ export async function putChangedFiles(
         "Content-Type": "application/json",
       },
       body,
+      // (W1498) The PUT is awaited inside the blocking after_doing gate, so a
+      // hung server must not hold completion hostage. Abort maps to the
+      // transport-failure catch below (return 0 → self-heal retries). 10s is
+      // generous enough for large diffs on slow links.
+      signal: AbortSignal.timeout(PUT_TIMEOUT_MS),
     });
     if (!resp.ok) {
       // Surface a failed upload instead of dropping it silently. The diff is
