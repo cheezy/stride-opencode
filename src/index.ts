@@ -161,45 +161,43 @@ export function extractEnvFromResponse(responseText: string): EnvCache {
   return env;
 }
 
-// --- After-goal detection ---
+// --- Response payload peeling (shared by after-goal detection and hook env) ---
 
 /**
- * Detect an `after_goal` entry in the response's `hooks` array. Mirrors
- * stride-hook.sh:response_has_after_goal (W504). Handles the same three
- * payload shapes as extractEnvFromResponse:
- *   1. {"stdout": "<api-json-string>", ...} — Bash-tool wrapper
- *   2. {"data": {...}, "hooks": [...]}      — raw wrapped API response
- *   3. Direct payload object with .hooks at top level
- *
- * The `output` argument matches what opencode passes to `tool.execute.after`
- * — either a string, an object with a `.output` or `.result` string, or a
- * raw object payload.
+ * Coerce the `tool.execute.after` `output` argument to the JSON-text view of
+ * the response payload — a string as-is, an object's `.output`/`.result`
+ * string, or the JSON-serialized object itself. Returns "" when there is
+ * nothing to read.
  */
-export function responseHasAfterGoal(output: unknown): boolean {
-  if (output == null) return false;
-
-  // Coerce `output` to the JSON-text view of the response payload.
-  let responseText: string | undefined;
-  if (typeof output === "string") {
-    responseText = output;
-  } else if (typeof output === "object") {
-    const wrapped =
-      (output as { output?: unknown }).output ??
-      (output as { result?: unknown }).result;
-    if (typeof wrapped === "string") {
-      responseText = wrapped;
-    } else if (wrapped != null) {
-      responseText = JSON.stringify(wrapped);
-    } else {
-      responseText = JSON.stringify(output);
+export function coerceOutputText(output: unknown): string {
+  if (output == null) return "";
+  if (typeof output === "string") return output;
+  if (typeof output === "object") {
+    let wrapped = (output as { output?: unknown }).output;
+    // An empty-string .output counts as absent so a populated .result still
+    // wins — preserves the pre-W1497 claim-branch fallthrough semantics.
+    if (wrapped == null || wrapped === "") {
+      wrapped = (output as { result?: unknown }).result ?? wrapped;
     }
+    if (typeof wrapped === "string") return wrapped;
+    if (wrapped != null) return JSON.stringify(wrapped);
+    return JSON.stringify(output);
   }
-  if (!responseText) return false;
+  return "";
+}
 
+/**
+ * Parse the response text and peel the Bash-tool `{stdout: "<json>"}`
+ * wrapper (if present), landing at the payload ROOT — where `hook`/`hooks`
+ * live as siblings of `data`. Returns null when the text is not a JSON
+ * object. Handles the same three payload shapes as extractEnvFromResponse
+ * (which peels one level deeper, to `.data`).
+ */
+export function peelPayloadRoot(
+  responseText: string,
+): Record<string, unknown> | null {
   try {
     const parsed: unknown = JSON.parse(responseText);
-
-    // Peel the Bash-tool wrapper if present
     let payload: unknown = parsed;
     if (
       parsed &&
@@ -212,20 +210,85 @@ export function responseHasAfterGoal(output: unknown): boolean {
         payload = parsed;
       }
     }
-
-    if (!payload || typeof payload !== "object") return false;
-    const hooks = (payload as { hooks?: unknown }).hooks;
-    if (!Array.isArray(hooks)) return false;
-
-    return hooks.some(
-      (h) =>
-        h &&
-        typeof h === "object" &&
-        (h as { name?: unknown }).name === "after_goal",
-    );
+    if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+      return null;
+    }
+    return payload as Record<string, unknown>;
   } catch {
-    return false;
+    return null;
   }
+}
+
+// --- After-goal detection ---
+
+/**
+ * Detect an `after_goal` entry in the response's `hooks` array. Mirrors
+ * stride-hook.sh:response_has_after_goal (W504).
+ *
+ * The `output` argument matches what opencode passes to `tool.execute.after`
+ * — either a string, an object with a `.output` or `.result` string, or a
+ * raw object payload.
+ */
+export function responseHasAfterGoal(output: unknown): boolean {
+  const payload = peelPayloadRoot(coerceOutputText(output));
+  if (!payload) return false;
+  const hooks = payload.hooks;
+  if (!Array.isArray(hooks)) return false;
+
+  return hooks.some(
+    (h) =>
+      h &&
+      typeof h === "object" &&
+      (h as { name?: unknown }).name === "after_goal",
+  );
+}
+
+// --- Server-supplied hook env extraction (W1497) ---
+
+/**
+ * Extract the server-supplied env for the named hook from an API response.
+ * Mirrors stride-hook.sh:extract_hook_env: claim responses carry a SINGULAR
+ * `hook` object, complete/mark_reviewed carry a `hooks` ARRAY — both are
+ * candidates. Returns {} when the response carries no matching entry (older
+ * servers omit hooks entirely — that is not an error), so keys the server
+ * omits are simply absent, never invented.
+ *
+ * TASK_BASE_REF is dropped — it is the client-owned diff anchor and must
+ * never be server-overridden. HOOK_NAME IS returned (callers deliver it
+ * ephemerally but exclude it from the persisted cache, where a stale value
+ * would mislead later hooks).
+ */
+export function extractHookEnvFromResponse(
+  responseText: string,
+  hookName: HookName,
+): EnvCache {
+  const root = peelPayloadRoot(responseText);
+  if (!root) return {};
+
+  const candidates: unknown[] = Array.isArray(root.hooks) ? [...root.hooks] : [];
+  if (root.hook && typeof root.hook === "object" && !Array.isArray(root.hook)) {
+    candidates.push(root.hook);
+  }
+
+  const entry = candidates.find(
+    (h) =>
+      h && typeof h === "object" && (h as { name?: unknown }).name === hookName,
+  );
+  if (!entry) return {};
+
+  const rawEnv = (entry as { env?: unknown }).env;
+  if (!rawEnv || typeof rawEnv !== "object" || Array.isArray(rawEnv)) return {};
+
+  const env: EnvCache = {};
+  for (const [key, value] of Object.entries(rawEnv)) {
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) continue;
+    if (key === "TASK_BASE_REF") continue;
+    if (typeof value === "string") env[key] = value;
+    else if (typeof value === "number" || typeof value === "boolean")
+      env[key] = String(value);
+    // null/object/array values are skipped — no invented values
+  }
+  return env;
 }
 
 // --- Plugin export ---
@@ -380,16 +443,19 @@ export const StridePlugin: Plugin = async (input) => {
   async function executeCommands(
     hookName: HookName,
     commands: string[],
+    extraEnv?: EnvCache,
   ): Promise<HookResult> {
     await loadEnvCacheIfEmpty();
     // (D95) The env cache rides the child environment, never shell text, so
     // user-controlled values (e.g. task titles) cannot inject shell syntax.
     // process.env is filtered because undefined values are not env data.
+    // (W1497) extraEnv is the server-supplied entry for THIS hook — applied
+    // last so server values win, ephemeral so it never touches envCache.
     const childEnv: Record<string, string> = {};
     for (const [k, v] of Object.entries(process.env)) {
       if (v !== undefined) childEnv[k] = v;
     }
-    Object.assign(childEnv, envCache);
+    Object.assign(childEnv, envCache, extraEnv ?? {});
 
     // (W1495) Execution — sh -c per line, section budget, group-kill on
     // expiry — lives in hook-exec.ts.
@@ -514,26 +580,19 @@ export const StridePlugin: Plugin = async (input) => {
       const hookName = detectHook("after", command);
       if (!hookName) return;
 
+      // (W1497) One JSON-text view of the response for every consumer below —
+      // the claim-time derivation, the per-hook server env extraction, and
+      // the after_goal env.
+      const responseText = coerceOutputText(output);
+
       // Cache environment variables from claim response
       if (hookName === "before_doing" && output) {
-        const responseText =
-          typeof output === "string"
-            ? output
-            : output?.output ||
-              (output as { result?: string })?.result ||
-              "";
         let envExtracted = false;
         if (responseText) {
           // (W1496) Fresh assignment, not a merge — a prior task's leftover
           // fields must not survive into the new claim (mirrors the bash
           // hook's truncating rewrite of .stride-env-cache on claim).
-          envCache = {
-            ...extractEnvFromResponse(
-              typeof responseText === "string"
-                ? responseText
-                : JSON.stringify(responseText),
-            ),
-          };
+          envCache = { ...extractEnvFromResponse(responseText) };
           envExtracted = true;
         }
         // Capture current git HEAD as TASK_BASE_REF so capture_changed_files
@@ -541,6 +600,14 @@ export const StridePlugin: Plugin = async (input) => {
         // projects just won't get the env var.
         const baseRef = await captureBaseRef();
         if (baseRef) envCache.TASK_BASE_REF = baseRef;
+        // (W1497) Merge the server's before_doing hook env over the derived
+        // task-record values — the server is the source of truth on
+        // collision. HOOK_NAME stays out of the cache: persisting it would
+        // deliver a stale routing value to later hooks (it still reaches
+        // before_doing commands ephemerally via extraEnv below).
+        const { HOOK_NAME: _ephemeralHookName, ...persistable } =
+          extractHookEnvFromResponse(responseText, "before_doing");
+        Object.assign(envCache, persistable);
         // Clear any stale changed-files snapshot and upload-state from a prior
         // task (W1094 — a stale 2xx would suppress the new task's self-heal).
         await clearStaleSnapshot();
@@ -570,7 +637,14 @@ export const StridePlugin: Plugin = async (input) => {
       let primarySucceeded = true;
 
       if (commands.length > 0) {
-        const result = await executeCommands(hookName, commands);
+        // (W1497) Deliver the server-supplied entry for THIS hook ephemerally.
+        // hookName here is only before_doing/before_review/after_review, so
+        // the after_goal entry can never reach primary commands.
+        const result = await executeCommands(
+          hookName,
+          commands,
+          extractHookEnvFromResponse(responseText, hookName),
+        );
         if (result.status === "failed") {
           primarySucceeded = false;
           // (W1495) Distinguish a timeout from an ordinary failure, mirroring
@@ -623,7 +697,14 @@ export const StridePlugin: Plugin = async (input) => {
       ) {
         const agCommands = parseStrideMd(strideMd, "after_goal");
         if (agCommands.length > 0) {
-          const agResult = await executeCommands("after_goal", agCommands);
+          // (W1497) GOAL_* rides the after_goal entry env, delivered here and
+          // only here — never merged into envCache, never visible to primary
+          // commands.
+          const agResult = await executeCommands(
+            "after_goal",
+            agCommands,
+            extractHookEnvFromResponse(responseText, "after_goal"),
+          );
           process.stdout.write(formatHookResultJson(agResult) + "\n");
         }
         // agCommands.length === 0 → silent no-op (back-compat); the server's

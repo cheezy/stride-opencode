@@ -11,6 +11,9 @@ import {
   extractToolName,
   extractToolArgs,
   extractEnvFromResponse,
+  extractHookEnvFromResponse,
+  coerceOutputText,
+  peelPayloadRoot,
   responseHasAfterGoal,
   StridePlugin,
 } from "./index";
@@ -1447,6 +1450,389 @@ describe("StridePlugin — W1496 env-cache persistence across restart", () => {
       const parsed = JSON.parse(line as string);
       expect(parsed.status).toBe("success");
       expect(parsed.commands_output[0].stdout).toBe(`title=${title}\n`);
+    } finally {
+      cleanup(dir);
+    }
+  });
+});
+
+// --- W1497: server-supplied hook env forwarded to hook commands ---
+//
+// extractHookEnvFromResponse mirrors stride-hook.sh's extract_hook_env: the
+// claim response carries a SINGULAR `hook` object, complete/mark_reviewed a
+// `hooks` ARRAY; the entry matching the routed hook supplies its env, which
+// is delivered ephemerally to that hook's commands (server wins on
+// collision), with GOAL_* isolated to after_goal.
+
+describe("extractHookEnvFromResponse", () => {
+  it("reads the singular claim `hook` entry and returns all its keys including HOOK_NAME", () => {
+    const response = JSON.stringify({
+      data: { id: 42 },
+      hook: {
+        name: "before_doing",
+        env: {
+          HOOK_NAME: "before_doing",
+          AGENT_NAME: "oc",
+          BOARD_ID: "7",
+          BOARD_NAME: "Main",
+          COLUMN_ID: "3",
+          COLUMN_NAME: "Doing",
+        },
+      },
+    });
+    expect(extractHookEnvFromResponse(response, "before_doing")).toEqual({
+      HOOK_NAME: "before_doing",
+      AGENT_NAME: "oc",
+      BOARD_ID: "7",
+      BOARD_NAME: "Main",
+      COLUMN_ID: "3",
+      COLUMN_NAME: "Doing",
+    });
+  });
+
+  it("routes each hooks-array entry env only to its own hook name", () => {
+    const response = JSON.stringify({
+      data: { id: 42 },
+      hooks: [
+        { name: "before_review", env: { BOARD_ID: "7" } },
+        { name: "after_goal", env: { GOAL_ID: "9", GOAL_IDENTIFIER: "G9" } },
+      ],
+    });
+    expect(extractHookEnvFromResponse(response, "after_goal")).toEqual({
+      GOAL_ID: "9",
+      GOAL_IDENTIFIER: "G9",
+    });
+    const beforeReview = extractHookEnvFromResponse(response, "before_review");
+    expect(beforeReview).toEqual({ BOARD_ID: "7" });
+    expect("GOAL_ID" in beforeReview).toBe(false);
+  });
+
+  it("peels the Bash-tool stdout wrapper", () => {
+    const inner = JSON.stringify({
+      hooks: [{ name: "after_goal", env: { GOAL_ID: "9" } }],
+    });
+    const wrapped = JSON.stringify({ stdout: inner, stderr: "" });
+    expect(extractHookEnvFromResponse(wrapped, "after_goal")).toEqual({
+      GOAL_ID: "9",
+    });
+  });
+
+  it("returns {} when there is no hooks key, an empty array, or no matching entry", () => {
+    expect(
+      extractHookEnvFromResponse(JSON.stringify({ data: { id: 42 } }), "before_doing"),
+    ).toEqual({});
+    expect(
+      extractHookEnvFromResponse(JSON.stringify({ hooks: [] }), "before_doing"),
+    ).toEqual({});
+    expect(
+      extractHookEnvFromResponse(
+        JSON.stringify({ hooks: [{ name: "after_goal" }] }),
+        "before_review",
+      ),
+    ).toEqual({});
+  });
+
+  it("returns {} for a matching entry with an empty or missing env", () => {
+    expect(
+      extractHookEnvFromResponse(
+        JSON.stringify({ hooks: [{ name: "after_goal", env: {} }] }),
+        "after_goal",
+      ),
+    ).toEqual({});
+    expect(
+      extractHookEnvFromResponse(
+        JSON.stringify({ hooks: [{ name: "after_goal" }] }),
+        "after_goal",
+      ),
+    ).toEqual({});
+  });
+
+  it("drops TASK_BASE_REF — the client-owned diff anchor is never server-overridden", () => {
+    const response = JSON.stringify({
+      hook: {
+        name: "before_doing",
+        env: { TASK_BASE_REF: "bogus", BOARD_ID: "7" },
+      },
+    });
+    expect(extractHookEnvFromResponse(response, "before_doing")).toEqual({
+      BOARD_ID: "7",
+    });
+  });
+
+  it("drops non-identifier keys and non-scalar values; coerces numbers and booleans", () => {
+    const response = JSON.stringify({
+      hook: {
+        name: "before_doing",
+        env: {
+          "BAD-KEY": "x",
+          "1X": "y",
+          BOARD_ID: 7,
+          TASK_NEEDS_REVIEW: false,
+          NESTED: { a: 1 },
+          NOTHING: null,
+          LIST: ["a"],
+        },
+      },
+    });
+    expect(extractHookEnvFromResponse(response, "before_doing")).toEqual({
+      BOARD_ID: "7",
+      TASK_NEEDS_REVIEW: "false",
+    });
+  });
+
+  it("returns {} for non-JSON or empty input", () => {
+    expect(extractHookEnvFromResponse("not json", "before_doing")).toEqual({});
+    expect(extractHookEnvFromResponse("", "before_doing")).toEqual({});
+  });
+
+  it("unions the hooks array with a singular hook entry", () => {
+    const response = JSON.stringify({
+      hooks: [{ name: "after_goal", env: { GOAL_ID: "9" } }],
+      hook: { name: "before_doing", env: { BOARD_ID: "7" } },
+    });
+    expect(extractHookEnvFromResponse(response, "before_doing")).toEqual({
+      BOARD_ID: "7",
+    });
+    expect(extractHookEnvFromResponse(response, "after_goal")).toEqual({
+      GOAL_ID: "9",
+    });
+  });
+});
+
+describe("coerceOutputText / peelPayloadRoot", () => {
+  it("coerces strings, .output/.result wrappers, raw objects, and null", () => {
+    expect(coerceOutputText("abc")).toBe("abc");
+    expect(coerceOutputText({ output: "xyz" })).toBe("xyz");
+    expect(coerceOutputText({ result: "res" })).toBe("res");
+    expect(coerceOutputText({ hooks: [] })).toBe(JSON.stringify({ hooks: [] }));
+    expect(coerceOutputText(null)).toBe("");
+    expect(coerceOutputText(undefined)).toBe("");
+  });
+
+  it("treats an empty-string .output as absent so a populated .result wins", () => {
+    expect(coerceOutputText({ output: "", result: "res" })).toBe("res");
+    expect(coerceOutputText({ output: "", result: undefined })).toBe("");
+  });
+
+  it("peels to the payload root through the stdout wrapper and rejects non-objects", () => {
+    const inner = JSON.stringify({ hooks: [{ name: "after_goal" }] });
+    expect(peelPayloadRoot(JSON.stringify({ stdout: inner }))).toEqual({
+      hooks: [{ name: "after_goal" }],
+    });
+    expect(peelPayloadRoot(inner)).toEqual({ hooks: [{ name: "after_goal" }] });
+    expect(peelPayloadRoot("not json")).toBeNull();
+    expect(peelPayloadRoot('"a string"')).toBeNull();
+    expect(peelPayloadRoot("[1,2]")).toBeNull();
+  });
+});
+
+// --- StridePlugin W1497: integration — server hook env reaches commands ---
+
+describe("StridePlugin — W1497 server hook env forwarding", () => {
+  const originalFetch = globalThis.fetch;
+  beforeEach(() => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (globalThis as any).fetch = async () => new Response("", { status: 200 });
+  });
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  async function initRepo(): Promise<string> {
+    const dir = mkdtempSync(join(tmpdir(), "stride-oc-w1497-"));
+    await $`git init -q`.cwd(dir).quiet();
+    await $`git config user.email "test@test.local"`.cwd(dir).quiet();
+    await $`git config user.name "Test"`.cwd(dir).quiet();
+    writeFileSync(
+      join(dir, ".gitignore"),
+      ".stride.md\n.stride-changed-files.json\n.stride-diff-upload-state\n.stride-env-cache\nboard.txt\ngoalcheck.txt\n",
+    );
+    writeFileSync(join(dir, "tracked.txt"), "v1\n");
+    await $`git add .gitignore tracked.txt`.cwd(dir).quiet();
+    await $`git commit -q -m v1`.cwd(dir).quiet();
+    return dir;
+  }
+  function cleanup(dir: string): void {
+    try { rmSync(dir, { recursive: true, force: true }); } catch { /* best-effort */ }
+  }
+  async function instantiate(dir: string) {
+    return (await StridePlugin({ directory: dir, worktree: dir, $ } as never)) as {
+      "tool.execute.before": (i: unknown, o?: unknown) => Promise<void>;
+      "tool.execute.after": (i: unknown, o?: unknown) => Promise<void>;
+    };
+  }
+
+  const CLAIM_CMD = "curl -X POST http://localhost/api/tasks/claim";
+  const COMPLETE_CMD =
+    'curl -X PATCH http://localhost/api/tasks/42/complete -H "Authorization: Bearer tok"';
+
+  it("W1497: claim hook env reaches before_doing commands — BOARD_*, COLUMN_*, AGENT_NAME, HOOK_NAME", async () => {
+    const dir = await initRepo();
+    try {
+      const hooks = await instantiate(dir);
+      writeFileSync(
+        join(dir, ".stride.md"),
+        '## before_doing\n\n```bash\nprintf \'%s|%s|%s|%s|%s|%s\' "$BOARD_ID" "$BOARD_NAME" "$COLUMN_ID" "$COLUMN_NAME" "$AGENT_NAME" "$HOOK_NAME" > board.txt\n```\n',
+      );
+      const claimResponse = JSON.stringify({
+        data: { id: 42, identifier: "W42", title: "T", status: "in_progress" },
+        hook: {
+          name: "before_doing",
+          env: {
+            HOOK_NAME: "before_doing",
+            AGENT_NAME: "oc",
+            BOARD_ID: "7",
+            BOARD_NAME: "Main Board",
+            COLUMN_ID: "3",
+            COLUMN_NAME: "Doing",
+          },
+        },
+      });
+      await hooks["tool.execute.after"]({ input: { command: CLAIM_CMD } }, claimResponse);
+      expect(readFileSync(join(dir, "board.txt"), "utf8")).toBe(
+        "7|Main Board|3|Doing|oc|before_doing",
+      );
+    } finally {
+      cleanup(dir);
+    }
+  });
+
+  it("W1497: server value wins over the derived one, persists to the cache — but HOOK_NAME does not persist", async () => {
+    const dir = await initRepo();
+    try {
+      const hooks = await instantiate(dir);
+      const claimResponse = JSON.stringify({
+        data: { id: 42, identifier: "W42", title: "Derived", status: "in_progress" },
+        hook: {
+          name: "before_doing",
+          env: {
+            HOOK_NAME: "before_doing",
+            TASK_TITLE: "ServerWins",
+            BOARD_ID: "7",
+            TASK_BASE_REF: "bogus",
+          },
+        },
+      });
+      await hooks["tool.execute.after"]({ input: { command: CLAIM_CMD } }, claimResponse);
+      const cache = JSON.parse(readFileSync(join(dir, ".stride-env-cache"), "utf8"));
+      expect(cache.TASK_TITLE).toBe("ServerWins");
+      expect(cache.BOARD_ID).toBe("7");
+      expect("HOOK_NAME" in cache).toBe(false);
+      // TASK_BASE_REF stays client-derived (a real git SHA, not "bogus").
+      expect(cache.TASK_BASE_REF).toMatch(/^[0-9a-f]{40}$/);
+    } finally {
+      cleanup(dir);
+    }
+  });
+
+  it("W1497: after_goal entry env reaches after_goal commands — and only after_goal commands", async () => {
+    const dir = await initRepo();
+    try {
+      const hooks = await instantiate(dir);
+      writeFileSync(
+        join(dir, ".stride.md"),
+        '## before_review\n\n```bash\nprintf \'%s\' "${GOAL_ID:-unset}" > goalcheck.txt\n```\n\n## after_goal\n\n```bash\necho "goal=$GOAL_ID/$GOAL_IDENTIFIER"\n```\n',
+      );
+      const completeResponse = JSON.stringify({
+        data: { id: 42 },
+        hooks: [
+          { name: "before_review", env: { BOARD_ID: "7" } },
+          { name: "after_goal", env: { GOAL_ID: "9", GOAL_IDENTIFIER: "G9" } },
+        ],
+      });
+      const origOut = process.stdout.write.bind(process.stdout);
+      let stdoutCap = "";
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (process.stdout as any).write = (chunk: unknown) => { stdoutCap += String(chunk); return true; };
+      try {
+        await hooks["tool.execute.after"](
+          { input: { command: COMPLETE_CMD } },
+          completeResponse,
+        );
+      } finally {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (process.stdout as any).write = origOut;
+      }
+      // GOAL_* did NOT reach the primary before_review command…
+      expect(readFileSync(join(dir, "goalcheck.txt"), "utf8")).toBe("unset");
+      // …but did reach the after_goal command.
+      const line = stdoutCap.split("\n").find((l) => l.includes('"hook":"after_goal"'));
+      expect(line).toBeDefined();
+      const parsed = JSON.parse(line as string);
+      expect(parsed.status).toBe("success");
+      expect(parsed.commands_output[0].stdout).toBe("goal=9/G9\n");
+      // …and never landed in the persisted cache.
+      if (existsSync(join(dir, ".stride-env-cache"))) {
+        const cache = JSON.parse(readFileSync(join(dir, ".stride-env-cache"), "utf8"));
+        expect("GOAL_ID" in cache).toBe(false);
+      }
+    } finally {
+      cleanup(dir);
+    }
+  });
+
+  it("W1497: a response without hooks behaves exactly as today (fallback derivation)", async () => {
+    const dir = await initRepo();
+    try {
+      const hooks = await instantiate(dir);
+      const claimResponse = JSON.stringify({
+        data: { id: 42, identifier: "W42", title: "T", status: "in_progress" },
+      });
+      await hooks["tool.execute.after"]({ input: { command: CLAIM_CMD } }, claimResponse);
+      writeFileSync(
+        join(dir, ".stride.md"),
+        '## before_review\n\n```bash\nprintf \'%s\' "$TASK_ID" > board.txt\n```\n',
+      );
+      await hooks["tool.execute.after"]({ input: { command: COMPLETE_CMD } }, "");
+      expect(readFileSync(join(dir, "board.txt"), "utf8")).toBe("42");
+    } finally {
+      cleanup(dir);
+    }
+  });
+
+  it("W1497: env values containing newlines arrive byte-for-byte", async () => {
+    const dir = await initRepo();
+    try {
+      const hooks = await instantiate(dir);
+      writeFileSync(
+        join(dir, ".stride.md"),
+        '## before_doing\n\n```bash\nprintf \'%s\' "$BOARD_NAME" > board.txt\n```\n',
+      );
+      const claimResponse = JSON.stringify({
+        data: { id: 42, identifier: "W42", title: "T", status: "in_progress" },
+        hook: {
+          name: "before_doing",
+          env: { BOARD_NAME: "line1\nline2" },
+        },
+      });
+      await hooks["tool.execute.after"]({ input: { command: CLAIM_CMD } }, claimResponse);
+      expect(readFileSync(join(dir, "board.txt"), "utf8")).toBe("line1\nline2");
+    } finally {
+      cleanup(dir);
+    }
+  });
+
+  it("W1497: an after_goal entry with an empty env still routes and succeeds", async () => {
+    const dir = await initRepo();
+    try {
+      const hooks = await instantiate(dir);
+      writeFileSync(join(dir, ".stride.md"), "## after_goal\n\n```bash\necho ok\n```\n");
+      const origOut = process.stdout.write.bind(process.stdout);
+      let stdoutCap = "";
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (process.stdout as any).write = (chunk: unknown) => { stdoutCap += String(chunk); return true; };
+      try {
+        await hooks["tool.execute.after"](
+          { input: { command: COMPLETE_CMD } },
+          JSON.stringify({ hooks: [{ name: "after_goal", env: {} }] }),
+        );
+      } finally {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (process.stdout as any).write = origOut;
+      }
+      const line = stdoutCap.split("\n").find((l) => l.includes('"hook":"after_goal"'));
+      expect(line).toBeDefined();
+      expect(JSON.parse(line as string).status).toBe("success");
     } finally {
       cleanup(dir);
     }
