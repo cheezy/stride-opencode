@@ -371,11 +371,26 @@ export const StridePlugin: Plugin = async ({
     const completed: string[] = [];
     const outputs: CommandOutput[] = [];
 
+    // (D95) The env cache rides the child environment, never shell text, so
+    // user-controlled values (e.g. task titles) cannot inject shell syntax.
+    // process.env is filtered because .env() rejects undefined values.
+    const childEnv: Record<string, string> = {};
+    for (const [k, v] of Object.entries(process.env)) {
+      if (v !== undefined) childEnv[k] = v;
+    }
+    Object.assign(childEnv, envCache);
+
     for (let i = 0; i < commands.length; i++) {
       const cmd = commands[i];
       try {
-        const result =
-          await $`cd ${projectDir} && ${envToExport(envCache)}${cmd}`.quiet();
+        // (D95) Run each line through `sh -c` so shell parsing (multi-token
+        // commands, &&, pipes, redirects) happens in a real shell — Bun's
+        // template interpolation single-token-escapes ${cmd}, which is exactly
+        // right here: the whole line becomes sh's single -c argument.
+        const result = await $`sh -c ${cmd}`
+          .cwd(projectDir)
+          .env(childEnv)
+          .quiet();
         completed.push(cmd);
 
         // (D65) Do NOT write the passing command's output to process.stderr — a
@@ -425,16 +440,6 @@ export const StridePlugin: Plugin = async ({
       commands_output: outputs,
       duration_ms: Date.now() - startTime,
     };
-  }
-
-  function envToExport(env: EnvCache): string {
-    const entries = Object.entries(env);
-    if (entries.length === 0) return "";
-    return (
-      entries
-        .map(([k, v]) => `export ${k}=${JSON.stringify(v)}`)
-        .join(" && ") + " && "
-    );
   }
 
   // Serialize a HookResult into the JSON shape stride-hook.sh emits on stdout

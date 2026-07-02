@@ -724,11 +724,10 @@ describe("StridePlugin — W1093 early capture + W1094 self-heal", () => {
 
 // --- StridePlugin D65: passing-gate output off stderr, folded into commands_output ---
 //
-// NOTE: opencode's executeCommands interpolates the command into a bun `$`
-// template; bun shell-escapes the interpolation, so only single-token commands
-// run cleanly in-process (a pre-existing limitation unrelated to D65). These
-// tests use `pwd` (succeeds, emits output) and `false` (exits 1) and skip the
-// claim step so envCache stays empty.
+// These tests use `pwd` (succeeds, emits output) and `false` (exits 1) and
+// skip the claim step so envCache stays empty. Multi-token and shell-syntax
+// coverage lives in the D95 describe below — since D95, executeCommands runs
+// each line through `sh -c`, so any shell command works here.
 
 describe("StridePlugin — D65 passing-gate output → commands_output (off stderr)", () => {
   const originalFetch = globalThis.fetch;
@@ -847,6 +846,216 @@ describe("StridePlugin — D65 passing-gate output → commands_output (off stde
     } finally {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (process.stdout as any).write = origOut;
+      cleanup(dir);
+    }
+  });
+});
+
+// --- StridePlugin D95: hook commands run through `sh -c` ---
+//
+// executeCommands passes each .stride.md line to `sh -c` as a single escaped
+// argument, so shell parsing (multi-token commands, &&, pipes, redirects,
+// quotes) happens in a real shell, with cwd set to the project dir and the
+// env cache delivered through the child environment (never shell text).
+// The after_goal path is used for observation because it is the only place a
+// HookResult is serialized to stdout.
+
+describe("StridePlugin — D95 sh -c command execution", () => {
+  const originalFetch = globalThis.fetch;
+  beforeEach(() => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (globalThis as any).fetch = async () => new Response("", { status: 200 });
+  });
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  async function initRepo(): Promise<string> {
+    const dir = mkdtempSync(join(tmpdir(), "stride-oc-d95-"));
+    await $`git init -q`.cwd(dir).quiet();
+    await $`git config user.email "test@test.local"`.cwd(dir).quiet();
+    await $`git config user.name "Test"`.cwd(dir).quiet();
+    writeFileSync(join(dir, "tracked.txt"), "v1\n");
+    await $`git add -A`.cwd(dir).quiet();
+    await $`git commit -q -m v1`.cwd(dir).quiet();
+    return dir;
+  }
+  function cleanup(dir: string): void {
+    try { rmSync(dir, { recursive: true, force: true }); } catch { /* best-effort */ }
+  }
+  async function instantiate(dir: string) {
+    return (await StridePlugin({ directory: dir, worktree: dir, $ } as never)) as {
+      "tool.execute.before": (i: unknown, o?: unknown) => Promise<void>;
+      "tool.execute.after": (i: unknown, o?: unknown) => Promise<void>;
+    };
+  }
+
+  const COMPLETE_CMD =
+    'curl -X PATCH http://localhost/api/tasks/42/complete -H "Authorization: Bearer tok"';
+  const AFTER_GOAL_RESPONSE = JSON.stringify({ hooks: [{ name: "after_goal" }] });
+
+  // Run the given after_goal section and return the parsed HookResult JSON
+  // emitted on stdout.
+  async function runAfterGoal(
+    dir: string,
+    hooks: Awaited<ReturnType<typeof instantiate>>,
+    section: string,
+  ): Promise<Record<string, any>> {
+    writeFileSync(join(dir, ".stride.md"), `## after_goal\n\n\`\`\`bash\n${section}\n\`\`\`\n`);
+    const origOut = process.stdout.write.bind(process.stdout);
+    let stdoutCap = "";
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (process.stdout as any).write = (chunk: unknown) => { stdoutCap += String(chunk); return true; };
+    try {
+      await hooks["tool.execute.after"]({ input: { command: COMPLETE_CMD } }, AFTER_GOAL_RESPONSE);
+    } finally {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (process.stdout as any).write = origOut;
+    }
+    const line = stdoutCap.split("\n").find((l) => l.includes('"hook":"after_goal"'));
+    expect(line).toBeDefined();
+    return JSON.parse(line as string);
+  }
+
+  it("D95: a multi-token command (git status --short) runs and captures stdout, with empty envCache", async () => {
+    const dir = await initRepo();
+    try {
+      const hooks = await instantiate(dir);
+      // No claim step ⇒ envCache stays empty. cwd must be the repo dir for
+      // git to see the untracked file.
+      writeFileSync(join(dir, "newfile.txt"), "hello\n");
+      const parsed = await runAfterGoal(dir, hooks, "git status --short");
+      expect(parsed.status).toBe("success");
+      expect(parsed.commands_output[0].stdout).toContain("?? newfile.txt");
+    } finally {
+      cleanup(dir);
+    }
+  });
+
+  it("D95: && inside a line runs both commands", async () => {
+    const dir = await initRepo();
+    try {
+      const hooks = await instantiate(dir);
+      const parsed = await runAfterGoal(dir, hooks, "echo one && echo two");
+      expect(parsed.status).toBe("success");
+      expect(parsed.commands_output[0].stdout).toBe("one\ntwo\n");
+    } finally {
+      cleanup(dir);
+    }
+  });
+
+  it("D95: && inside a line stops at the first failure", async () => {
+    const dir = await initRepo();
+    try {
+      const hooks = await instantiate(dir);
+      const parsed = await runAfterGoal(dir, hooks, "false && echo never");
+      expect(parsed.status).toBe("failed");
+      expect(parsed.exit_code).toBe(1);
+      expect(parsed.stdout).not.toContain("never");
+    } finally {
+      cleanup(dir);
+    }
+  });
+
+  it("D95: pipes and output redirects work, with the redirect landing in the project dir", async () => {
+    const dir = await initRepo();
+    try {
+      const hooks = await instantiate(dir);
+      const parsed = await runAfterGoal(
+        dir,
+        hooks,
+        "printf 'a\\nb\\nc\\n' | wc -l\necho hi > out.txt",
+      );
+      expect(parsed.status).toBe("success");
+      expect(parsed.commands_output[0].stdout.trim()).toBe("3");
+      expect(readFileSync(join(dir, "out.txt"), "utf8")).toBe("hi\n");
+    } finally {
+      cleanup(dir);
+    }
+  });
+
+  it("D95: env-cache values reach commands as env vars, delivered literally (no expansion, no injection)", async () => {
+    const dir = await initRepo();
+    try {
+      const hooks = await instantiate(dir);
+      // Task titles are user-controlled: this one carries $-refs, backticks,
+      // and both quote styles. It must arrive byte-for-byte in the child env —
+      // never evaluated as shell text.
+      const title = "Pay $100 via `whoami` \"double\" 'single'";
+      const claimResponse = JSON.stringify({
+        data: { id: 42, identifier: "W42", title, status: "in_progress" },
+      });
+      await hooks["tool.execute.after"](
+        { input: { command: "curl -X POST http://localhost/api/tasks/claim" } },
+        claimResponse,
+      );
+      const parsed = await runAfterGoal(dir, hooks, 'echo "title=$TASK_TITLE"');
+      expect(parsed.status).toBe("success");
+      expect(parsed.commands_output[0].stdout).toBe(`title=${title}\n`);
+    } finally {
+      cleanup(dir);
+    }
+  });
+
+  it("D95: embedded single and double quotes parse as shell quoting", async () => {
+    const dir = await initRepo();
+    try {
+      const hooks = await instantiate(dir);
+      const parsed = await runAfterGoal(dir, hooks, "echo \"double part\" 'single part'");
+      expect(parsed.status).toBe("success");
+      expect(parsed.commands_output[0].stdout).toBe("double part single part\n");
+    } finally {
+      cleanup(dir);
+    }
+  });
+
+  it("D95: a command that emits only stderr still succeeds with stderr captured", async () => {
+    const dir = await initRepo();
+    try {
+      const hooks = await instantiate(dir);
+      const parsed = await runAfterGoal(dir, hooks, "echo warn >&2");
+      expect(parsed.status).toBe("success");
+      expect(parsed.commands_output[0].stdout).toBe("");
+      expect(parsed.commands_output[0].stderr).toBe("warn\n");
+    } finally {
+      cleanup(dir);
+    }
+  });
+
+  it("D95: a failing multi-token command returns the structured failure shape with commands_remaining", async () => {
+    const dir = await initRepo();
+    try {
+      const hooks = await instantiate(dir);
+      const parsed = await runAfterGoal(
+        dir,
+        hooks,
+        "git status --bogus-flag-nope\necho second",
+      );
+      expect(parsed.status).toBe("failed");
+      expect(parsed.failed_command).toBe("git status --bogus-flag-nope");
+      expect(parsed.command_index).toBe(0);
+      expect(parsed.exit_code).not.toBe(0);
+      expect(parsed.stderr).not.toBe("");
+      expect(parsed.commands_completed).toEqual([]);
+      expect(parsed.commands_remaining).toEqual(["echo second"]);
+    } finally {
+      cleanup(dir);
+    }
+  });
+
+  it("D95: full tool.execute.before after_doing flow passes with a multi-token gate command", async () => {
+    const dir = await initRepo();
+    try {
+      const hooks = await instantiate(dir);
+      writeFileSync(
+        join(dir, ".stride.md"),
+        "## after_doing\n\n```bash\ngit status --short\n```\n",
+      );
+      // Before D95 this threw command-not-found (the whole line was escaped
+      // into a single token). Now the gate passes.
+      await hooks["tool.execute.before"]({ input: { command: COMPLETE_CMD } });
+      expect(existsSync(join(dir, ".stride-changed-files.json"))).toBe(true);
+    } finally {
       cleanup(dir);
     }
   });
