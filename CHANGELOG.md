@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.23.0] - 2026-07-02
+
+### Added — server-supplied hook env is forwarded to hook commands (W1497)
+
+The plugin derived only `TASK_*` variables from the claim response's task record. The hook contract documents `HOOK_NAME`, `AGENT_NAME`, `BOARD_ID`, `BOARD_NAME`, `COLUMN_ID`, `COLUMN_NAME` for every hook and `GOAL_ID`/`GOAL_IDENTIFIER`/`GOAL_TITLE`/`GOAL_DESCRIPTION` for `after_goal` — none were forwarded, so hook scripts using them silently saw empty strings and the documented follow-up `PATCH /api/tasks/GOAL_ID/after_goal` could not resolve its goal id from env.
+
+- **`src/index.ts`** — new `extractHookEnvFromResponse(responseText, hookName)` mirrors `stride-hook.sh`'s `extract_hook_env`: the claim response's **singular** `hook` object and the `hooks` **array** from complete/mark_reviewed responses are both candidates; the entry matching the routed hook supplies its `env`. Identifier keys are validated, scalar values coerced, and the client-owned `TASK_BASE_REF` is dropped (never server-overridden). The claim branch merges the `before_doing` entry env over the derived task-record values — **server wins on collision** — before the W1496 persistence, minus `HOOK_NAME` (a persisted routing value would go stale; it still reaches commands ephemerally). `executeCommands` gains an optional `extraEnv` applied last: each hook's own entry env is delivered ephemerally, and the `after_goal` entry (`GOAL_*`) reaches after_goal commands **only** — never primary commands, never the persisted cache. Older servers without hooks keys behave exactly as before; omitted keys stay absent (no client-derived `GOAL_*` from `parent_id`).
+- **Payload peeling unified** — the three-shape peeling (Bash-tool `stdout` wrapper, `data` wrapper, raw object) that was duplicated between `extractEnvFromResponse` and `responseHasAfterGoal` is factored into shared `coerceOutputText`/`peelPayloadRoot` helpers, with `responseHasAfterGoal` behavior preserved (including the empty-string `.output` → `.result` fallthrough from the pre-refactor claim branch).
+- **Tests** — 18 new: a 9-case unit describe for `extractHookEnvFromResponse` (singular/array/union shapes, stdout wrapper, no-match/empty-env fallbacks, `TASK_BASE_REF` and non-identifier/non-scalar drops), coercion/peeling unit tests, and a 6-test integration describe (all six shared vars reach a `before_doing` command; server `TASK_TITLE` beats the derived one and persists while `HOOK_NAME` does not; `GOAL_*` reaches `after_goal` but not `before_review` and never the cache; no-hooks fallback; newline values byte-for-byte; empty-env `after_goal` entry still routes).
+
+### Backward compatibility
+
+Responses without `hook`/`hooks` keys — older servers — behave byte-for-byte as before. The failure/success `HookResult` wire shapes are untouched. Feature minor (1.22.0 → 1.23.0).
+
+### Source
+
+W1497.
+
 ## [1.22.0] - 2026-07-02
 
 ### Added — the claim env cache is persisted to disk (W1496)
