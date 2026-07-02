@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.24.0] - 2026-07-02
+
+### Changed — the changed-files completion contract in `stride-completing-tasks` (W1499)
+
+The skill still mandated inline-embedding `.stride-changed-files.json` into the completion payload as a hard checklist gate — redundant and error-prone now that the plugin PUTs the snapshot to the server itself — and its instructions used `CLAUDE_PROJECT_DIR`, which is unset under opencode and silently collapses to the current directory.
+
+- **`skills/stride-completing-tasks/SKILL.md`** — The pre-completion checklist's inline-embed gate is replaced by two canonical (stride 1.33.0) items adapted to opencode conventions: the `reviewer_result` whole-object-verbatim item (mechanical `{...structured}` copy with the `project_checks` count self-check) and a per-file-diffs item stating **no agent-side action is required on Stride server v1.16.0+** — the plugin's `tool.execute.before` pass on `/complete` captures and PUTs the snapshot automatically. The primary completion example and illustrative request body omit `changed_files`. The Per-File Diff Capture section now documents the opencode plugin's real upload flow — early capture + fire-and-forget PUT before the `after_doing` gate, post-gate refresh, base64 transport envelope (D61), `.stride_auth.md`-first credential resolution, and the `before_review` upload self-heal with `.stride-diff-upload-state` bookkeeping — followed by a server-version **Backwards compatibility** matrix and the inline embed preserved only under the labelled **Legacy inline pattern (≤ v1.15.x deployments)**. Every `CLAUDE_PROJECT_DIR` reference is replaced with the port's project-dir chain `${OPENCODE_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$(pwd)}}`, and a back-compat `changed_files` row joins the field reference table.
+
+### Backward compatibility
+
+Documentation/skill-text only. No `src/` change (the test suite is unchanged at 213 passing), no wire-shape or hook change. The explorer/reviewer skip-form contracts and the mandatory pre-submission self-check section are untouched. Feature minor (1.23.0 → 1.24.0).
+
+### Source
+
+W1499 (mirrors the canonical stride 1.33.0 stride-completing-tasks contract).
+
 ## [1.23.0] - 2026-07-02
 
 ### Added — server-supplied hook env is forwarded to hook commands (W1497)
