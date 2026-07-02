@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.24.2] - 2026-07-02
+
+### Fixed — stale `stride/agents/` path references across the skills (D96)
+
+Five schema-ownership citations still pointed at the Claude Code marketplace path `stride/agents/task-reviewer.md` (one wrapped in a GitHub URL on the `cheezy/stride` repo) — paths that do not exist in this repository, so readers following the schema-of-record citations landed nowhere.
+
+- **`skills/stride-completing-tasks/SKILL.md`** (3 sites), **`skills/stride-workflow/SKILL.md`** (1 site), **`skills/stride-subagent-workflow/SKILL.md`** (1 site, dropping the `cheezy/stride` GitHub link wrapper) — all five citations now use the port's plain-backtick `agents/task-reviewer.md` style already used by the files' other references, and every citation resolves to the local agent definition. Reference-only change; no schema content touched. `grep -rn 'stride/agents' skills/` now returns zero hits.
+
+### Backward compatibility
+
+Documentation-only. No code, wire-shape, or hook change. Bugfix patch (1.24.1 → 1.24.2).
+
+### Source
+
+D96.
+
 ## [1.24.1] - 2026-07-02
 
 ### Fixed — the changed-files PUT can no longer stall the after_doing gate (W1498)

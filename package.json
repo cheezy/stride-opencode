@@ -1,6 +1,6 @@
 {
   "name": "opencode-stride",
-  "version": "1.24.1",
+  "version": "1.24.2",
   "description": "Stride task lifecycle skills and agents for OpenCode: claiming, completing, creating tasks and goals",
   "main": "src/index.ts",
   "module": "src/index.ts",
