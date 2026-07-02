@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.25.0] - 2026-07-02
+
+### Added — `skills_version` documented on the claim and complete payloads (W1500)
+
+The canonical plugin sends `skills_version` on claim and complete so the server can reply `skills_update_required` when an agent's skills are stale. No opencode skill emitted the field, so the staleness nudge could never fire for opencode agents.
+
+- **`skills/stride-claiming-tasks/SKILL.md`** — the claim payload example carries `skills_version` with a value-source note (the installed `opencode-stride` `package.json` `version` field — never a hardcoded string that rots), and the Claim Request Checklist gains an optional-field row.
+- **`skills/stride-completing-tasks/SKILL.md`** — the primary `jq` completion example (`--arg skills_version` + body key), the illustrative request body, and the Completion Request Field Reference table all carry the field.
+- **`skills/stride-workflow/SKILL.md`** — both inline examples (Step 2 claim, Step 8 complete) carry the field, with a prose note on the claim side and an Optional fields row on the complete side.
+- **Fixed en route:** both "Handling Stale Skills" sections instructed `npm install opencode-stride@latest`, which is factually wrong — the npm package is unpublished per the README. They now give the README-consistent update path (re-clone the repository and `cp -R stride-opencode/skills/. .opencode/skills/`, bumping any `github:cheezy/stride-opencode#v<tag>` pin in `opencode.json`), and the workflow skill's terse skills-update edge case explains the trigger and points at the fuller sections.
+
+### Backward compatibility
+
+Documentation/skill-text only. No `src/` change (test suite unchanged at 216 passing), no wire-shape change — `skills_version` is optional and was already accepted by the API. Feature minor (1.24.2 → 1.25.0); the payload examples show `"1.25.0"`, the version this ships in.
+
+### Source
+
+W1500.
+
 ## [1.24.2] - 2026-07-02
 
 ### Fixed — stale `stride/agents/` path references across the skills (D96)
