@@ -276,19 +276,26 @@ Suggested fix: Resolve conflicts in listed files. Open each file, find <<<< mark
 
 ## Hook Timeout Handling
 
-**Detection:** Duration ≥ timeout threshold AND output may be empty or truncated
+The plugin enforces per-hook time budgets itself (`HOOK_TIMEOUTS_MS` in `src/hook-exec.ts`). When a command exhausts its budget, the plugin kills the command's whole process group (SIGTERM, then SIGKILL after a 2,000 ms grace) and reports exit code **124** (the GNU `timeout` convention).
 
-**Timeout thresholds:**
+**Detection (structured JSON):** the failure object carries `timed_out: true`, `exit_code: 124`, and `budget_ms` — this is the definitive timeout signal; no duration heuristic needed. Trust the reported `budget_ms` as the budget that applied.
+
+**Detection (raw text, legacy):** Duration ≥ the budget for that hook AND output may be empty or truncated.
+
+**Plugin-enforced budgets** (`HOOK_TIMEOUTS_MS`):
 - before_doing: 60,000 ms
 - after_doing: 120,000 ms
 - before_review: 60,000 ms
 - after_review: 60,000 ms
+- after_goal: 60,000 ms
+
+The budget applies to the hook section as a whole: each command runs against the section's remaining budget, so a slow early command starves the ones after it.
 
 **When timeout detected:**
 ```
 Category: Hook Timeout
 Severity: Critical
-Description: Hook exceeded timeout (duration_ms >= threshold)
+Description: Hook command exceeded its budget (timed_out: true, exit code 124, budget_ms reported by the plugin)
 Suggested fix: Check which command is slow. Common causes:
   - Large test suite: Run specific test files instead of full suite
   - Network issues: Check connectivity for git/hex operations
@@ -332,7 +339,46 @@ Issues must be fixed in this order — later fixes often become unnecessary once
 
 ## Structured Output Format
 
-The diagnostician returns a single structured analysis:
+The diagnostician returns a single structured analysis. When the input was structured JSON, include the command sequence context.
+
+### When input is structured JSON (from the plugin's `tool.execute` hooks):
+
+Render the sequence from the parsed fields: each entry in `commands_completed` is `[PASSED]`, the `failed_command` is `[FAILED]`, and each entry in `commands_remaining` is `[SKIPPED]`. When `commands_remaining` is empty, the failed command was the last in the sequence — the block simply has no `[SKIPPED]` entries.
+
+```
+## Hook Failure Analysis
+
+**Hook:** after_doing
+**Failed command:** mix test --cover (command 2 of 4)
+**Exit code:** 1
+
+### Command Sequence
+- [PASSED] mix format --check-formatted
+- [FAILED] mix test --cover
+- [SKIPPED] mix credo --strict
+- [SKIPPED] mix sobelow --config .sobelow_config.exs
+
+### Summary
+2 issues found (1 High, 1 Minor)
+
+### Issues (ordered by fix priority)
+
+**1. [High] Test Failure**
+- File: test/kanban/tasks_test.exs:120
+- Test: create_comment/2 with valid data
+- Description: Expected {:ok, %TaskComment{}} but got {:error, %Changeset{}}
+- Fix: Check changeset validations — required fields may be missing from test attrs
+
+**2. [Minor] Formatting**
+- Files: lib/kanban/tasks.ex
+- Fix: Run `mix format` (note: this was in a PASSED command — may have been auto-fixed)
+
+### Fix Order
+1. Fix test failure in test/kanban/tasks_test.exs:120
+2. Re-run hook — all 4 commands will re-execute
+```
+
+### When input is raw text (legacy format):
 
 ```
 ## Hook Failure Analysis
