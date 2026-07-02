@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.21.0] - 2026-07-02
+
+### Added — per-hook timeout enforcement (W1495)
+
+A hung hook command (for example a test suite waiting on input) previously blocked the opencode session forever, with no signal to the agent about what stalled. Hook execution now enforces the canonical per-hook budgets from the stride-workflow Hooks Reference.
+
+- **`src/hook-exec.ts`** (new) — hook execution extracted from `index.ts` into a focused module. `HOOK_TIMEOUTS_MS` maps the five hooks to their budgets (120s for `after_doing`, 60s for `before_doing`/`before_review`/`after_review`/`after_goal`). Budgets are **section-level**: each command runs under the budget remaining for its section, and an already-exhausted budget fails the command with exit code 124 without spawning it. On expiry the command's whole process tree is killed — the `sh -c` child is spawned detached (its own process group) and the group receives SIGTERM, a 2s grace, then SIGKILL — mirroring `stride-hook.sh`'s W1454 watchdog. A timeout failure carries `exit_code: 124` (GNU timeout convention) plus new `timed_out` and `budget_ms` fields on the failure JSON (a strict superset of the existing failure shape). Budgets, the kill grace, and the clock are injectable in the skill-gate DI style so tests run in milliseconds.
+- **`src/index.ts`** — `executeCommands` is now a thin wrapper resolving the hook's budget and delegating to `executeHookCommands`; `formatHookResultJson` and the thrown `after_doing` gate error include `timed_out`/`budget_ms`; the after-path stderr message distinguishes "timed out after Ns budget" from an ordinary failure. `HookResult`/`CommandOutput` moved to `hook-exec.ts` and are re-exported.
+- **`src/hook-exec.test.ts`** (new, 12 tests) + a 3-test W1495 describe in **`src/index.test.ts`** — cover the budget table, override resolution, timeout termination with wall-clock assertions, partial-output capture, second-command timeout, pre-spawn budget exhaustion, grandchild process reaping, SIGTERM-immune SIGKILL escalation, and the full hanging-gate integration flow (structured throw + W1093 early diff capture preserved).
+
+### Backward compatibility
+
+The success-path `HookResult` shape is unchanged; the failure shape gains only the additive `timed_out`/`budget_ms` fields (matching the bash hook's `timed_out`/`budget_seconds` convention, in ms). Blocking semantics are unchanged — a timed-out `after_doing` still throws and blocks the completion curl, and the W1093 early diff capture still runs before the gate. Feature minor (1.20.1 → 1.21.0).
+
+### Source
+
+W1495.
+
 ## [1.20.1] - 2026-07-02
 
 ### Fixed — hook commands now run through a real shell (D95)
