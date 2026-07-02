@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.20.1] - 2026-07-02
+
+### Fixed — hook commands now run through a real shell (D95)
+
+Any real-world `.stride.md` hook line (`mix test`, `git pull origin main`, `mix credo --strict`) failed under the plugin with command-not-found, breaking the `before_doing` and `after_doing` quality gates entirely. `executeCommands` interpolated each line into a Bun `$` tagged template, which shell-escapes the interpolation into a single token — so only single-token commands like `pwd` ran. `envToExport` additionally built `export` statements with `JSON.stringify`, which is not shell quoting.
+
+- **`src/index.ts`** — `executeCommands` now runs each `.stride.md` line via `sh -c` with the whole line delivered as sh's single `-c` argument, so shell parsing (multi-token commands, `&&`, pipes, redirects, quotes) happens in a real shell. `cwd` is set to the project dir via `.cwd()`, and the env cache is merged over `process.env` and passed through `.env()` as environment data — user-controlled values (e.g. task titles) can no longer inject shell syntax. `envToExport` is deleted.
+- **`src/index.test.ts`** — New D95 describe (9 tests) covering multi-token commands (`git status --short`), `&&` chains (both run; stop on first failure), pipes and redirects, literal env delivery of `$`/backtick/quote metacharacters through the claim path, embedded quotes, stderr-only commands, the structured failure shape with `commands_remaining`, and the full `tool.execute.before` after_doing flow with a multi-token gate. The stale single-token-limitation note above the D65 describe is rewritten.
+
+### Backward compatibility
+
+The `HookResult` interface, `formatHookResultJson` output shape, and the 2000-character stdout/stderr tail truncation are unchanged — the agent workflow and `after_goal` PATCH consumers are unaffected. Bugfix patch (1.20.0 → 1.20.1).
+
+### Source
+
+D95.
+
 ## [1.20.0] - 2026-07-01
 
 ### Added — `API Notes & Limitations` section in the workflow orchestrator skill (G286 / W1417)
