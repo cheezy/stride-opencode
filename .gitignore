@@ -26,3 +26,4 @@ bun.lock
 # Stride hook state artifacts (regenerated every after_doing run; never committed)
 .stride-changed-files.json
 .stride-diff-upload-state
+.stride-env-cache

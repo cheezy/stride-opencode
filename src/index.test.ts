@@ -1202,3 +1202,253 @@ describe("StridePlugin — W1495 per-hook timeout enforcement", () => {
     }
   });
 });
+
+// --- StridePlugin W1496: env cache persisted to disk across restarts ---
+//
+// The claim writes envCache to .stride-env-cache; a fresh plugin instance
+// (same dir) simulates a host restart — its empty in-memory cache is lazily
+// rehydrated from the file, so the after_doing capture, self-heal, and hook
+// env delivery all keep working with the original TASK_ID/TASK_BASE_REF.
+
+describe("StridePlugin — W1496 env-cache persistence across restart", () => {
+  const originalFetch = globalThis.fetch;
+  let putCalls: string[] = [];
+
+  beforeEach(() => {
+    putCalls = [];
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (globalThis as any).fetch = async (url: string) => {
+      if (typeof url === "string" && url.includes("/changed_files")) {
+        putCalls.push(url);
+      }
+      return new Response("", { status: 200 });
+    };
+  });
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  async function initRepo(): Promise<string> {
+    const dir = mkdtempSync(join(tmpdir(), "stride-oc-w1496-"));
+    await $`git init -q`.cwd(dir).quiet();
+    await $`git config user.email "test@test.local"`.cwd(dir).quiet();
+    await $`git config user.name "Test"`.cwd(dir).quiet();
+    writeFileSync(
+      join(dir, ".gitignore"),
+      ".stride.md\n.stride-changed-files.json\n.stride-diff-upload-state\n.stride-env-cache\n",
+    );
+    writeFileSync(join(dir, "tracked.txt"), "v1\n");
+    await $`git add .gitignore tracked.txt`.cwd(dir).quiet();
+    await $`git commit -q -m v1`.cwd(dir).quiet();
+    return dir;
+  }
+  function cleanup(dir: string): void {
+    try { rmSync(dir, { recursive: true, force: true }); } catch { /* best-effort */ }
+  }
+  async function instantiate(dir: string) {
+    return (await StridePlugin({ directory: dir, worktree: dir, $ } as never)) as {
+      "tool.execute.before": (i: unknown, o?: unknown) => Promise<void>;
+      "tool.execute.after": (i: unknown, o?: unknown) => Promise<void>;
+    };
+  }
+
+  const CLAIM_CMD =
+    'curl -X POST http://localhost/api/tasks/claim -H "Authorization: Bearer tok"';
+  const COMPLETE_CMD =
+    'curl -X PATCH http://localhost/api/tasks/42/complete -H "Authorization: Bearer tok"';
+  const CLAIM_RESPONSE = JSON.stringify({
+    data: { id: 42, identifier: "W42", title: "T", status: "in_progress" },
+  });
+
+  it("W1496: claim writes the extracted env cache to .stride-env-cache — task metadata only", async () => {
+    const dir = await initRepo();
+    try {
+      const hooks = await instantiate(dir);
+      await hooks["tool.execute.after"]({ input: { command: CLAIM_CMD } }, CLAIM_RESPONSE);
+      const raw = readFileSync(join(dir, ".stride-env-cache"), "utf8");
+      const cache = JSON.parse(raw);
+      expect(cache.TASK_ID).toBe("42");
+      expect(cache.TASK_IDENTIFIER).toBe("W42");
+      expect(cache.TASK_BASE_REF).toMatch(/^[0-9a-f]{40}$/);
+      // The claim command carried a bearer token — it must not reach the file.
+      expect(raw).not.toMatch(/Bearer|tok/);
+    } finally {
+      cleanup(dir);
+    }
+  });
+
+  it("W1496: a fresh instance reloads the cache — after_doing PUTs with the original TASK_ID and TASK_BASE_REF", async () => {
+    const dir = await initRepo();
+    try {
+      const instanceA = await instantiate(dir);
+      await instanceA["tool.execute.after"]({ input: { command: CLAIM_CMD } }, CLAIM_RESPONSE);
+      // Two post-claim commits: a HEAD~1 fallback would only see b.txt, so
+      // a.txt appearing in the snapshot proves TASK_BASE_REF was reloaded.
+      writeFileSync(join(dir, "a.txt"), "post-claim a\n");
+      await $`git add a.txt`.cwd(dir).quiet();
+      await $`git commit -q -m a`.cwd(dir).quiet();
+      writeFileSync(join(dir, "b.txt"), "post-claim b\n");
+      await $`git add b.txt`.cwd(dir).quiet();
+      await $`git commit -q -m b`.cwd(dir).quiet();
+
+      putCalls = [];
+      const instanceB = await instantiate(dir); // restart: empty in-memory cache
+      writeFileSync(join(dir, ".stride.md"), "## after_doing\n\n```bash\n```\n");
+      await instanceB["tool.execute.before"]({ input: { command: COMPLETE_CMD } });
+
+      expect(putCalls.length).toBe(1);
+      expect(putCalls[0]).toContain("/api/tasks/42/changed_files");
+      const state = readFileSync(join(dir, ".stride-diff-upload-state"), "utf8");
+      expect(state).toBe("task_id=42\nhttp_code=200\n");
+      const snapshot = JSON.parse(
+        readFileSync(join(dir, ".stride-changed-files.json"), "utf8"),
+      ) as { path: string }[];
+      const paths = snapshot.map((f) => f.path);
+      expect(paths).toContain("a.txt");
+      expect(paths).toContain("b.txt");
+    } finally {
+      cleanup(dir);
+    }
+  });
+
+  it("W1496: a fresh instance's before_review self-heal still finds TASK_ID", async () => {
+    const dir = await initRepo();
+    try {
+      const instanceA = await instantiate(dir);
+      await instanceA["tool.execute.after"]({ input: { command: CLAIM_CMD } }, CLAIM_RESPONSE);
+      putCalls = [];
+      const instanceB = await instantiate(dir);
+      await instanceB["tool.execute.after"]({ input: { command: COMPLETE_CMD } }, "");
+      expect(putCalls.length).toBe(1);
+      expect(putCalls[0]).toContain("/api/tasks/42/changed_files");
+    } finally {
+      cleanup(dir);
+    }
+  });
+
+  it("W1496: after_review clears the cache file alongside the other state files", async () => {
+    const dir = await initRepo();
+    try {
+      const hooks = await instantiate(dir);
+      await hooks["tool.execute.after"]({ input: { command: CLAIM_CMD } }, CLAIM_RESPONSE);
+      expect(existsSync(join(dir, ".stride-env-cache"))).toBe(true);
+      writeFileSync(join(dir, ".stride.md"), "## before_doing\n\n```bash\necho hi\n```\n");
+      const reviewCmd = "curl -X PATCH http://localhost/api/tasks/42/mark_reviewed";
+      await hooks["tool.execute.after"]({ input: { command: reviewCmd } }, "");
+      expect(existsSync(join(dir, ".stride-env-cache"))).toBe(false);
+      expect(existsSync(join(dir, ".stride-changed-files.json"))).toBe(false);
+      expect(existsSync(join(dir, ".stride-diff-upload-state"))).toBe(false);
+    } finally {
+      cleanup(dir);
+    }
+  });
+
+  it("W1496: a new claim overwrites a stale prior-task cache", async () => {
+    const dir = await initRepo();
+    try {
+      writeFileSync(
+        join(dir, ".stride-env-cache"),
+        '{"TASK_ID":"41","TASK_DESCRIPTION":"old"}\n',
+      );
+      const hooks = await instantiate(dir);
+      await hooks["tool.execute.after"]({ input: { command: CLAIM_CMD } }, CLAIM_RESPONSE);
+      const cache = JSON.parse(readFileSync(join(dir, ".stride-env-cache"), "utf8"));
+      expect(cache.TASK_ID).toBe("42");
+      expect("TASK_DESCRIPTION" in cache).toBe(false);
+    } finally {
+      cleanup(dir);
+    }
+  });
+
+  it("W1496: a corrupt cache degrades to the empty-cache behaviour without throwing", async () => {
+    const dir = await initRepo();
+    try {
+      writeFileSync(join(dir, ".stride-env-cache"), "{corrupt");
+      const hooks = await instantiate(dir);
+      writeFileSync(join(dir, ".stride.md"), "## after_doing\n\n```bash\n```\n");
+      await hooks["tool.execute.before"]({ input: { command: COMPLETE_CMD } });
+      // No TASK_ID → the PUT and upload-state record are skipped, but the
+      // snapshot is still written (current empty-cache behaviour).
+      expect(putCalls.length).toBe(0);
+      expect(existsSync(join(dir, ".stride-diff-upload-state"))).toBe(false);
+      expect(existsSync(join(dir, ".stride-changed-files.json"))).toBe(true);
+    } finally {
+      cleanup(dir);
+    }
+  });
+
+  it("W1496: deleting the cache file mid-task doesn't hurt the same instance (memory wins)", async () => {
+    const dir = await initRepo();
+    try {
+      const hooks = await instantiate(dir);
+      await hooks["tool.execute.after"]({ input: { command: CLAIM_CMD } }, CLAIM_RESPONSE);
+      rmSync(join(dir, ".stride-env-cache"));
+      putCalls = [];
+      writeFileSync(join(dir, ".stride.md"), "## after_doing\n\n```bash\n```\n");
+      await hooks["tool.execute.before"]({ input: { command: COMPLETE_CMD } });
+      expect(putCalls.length).toBe(1);
+      expect(putCalls[0]).toContain("/api/tasks/42/changed_files");
+    } finally {
+      cleanup(dir);
+    }
+  });
+
+  it("W1496: two projects keep separate caches", async () => {
+    const dirA = await initRepo();
+    const dirB = await initRepo();
+    try {
+      const hooksA = await instantiate(dirA);
+      const hooksB = await instantiate(dirB);
+      await hooksA["tool.execute.after"]({ input: { command: CLAIM_CMD } }, CLAIM_RESPONSE);
+      const claimB = JSON.stringify({
+        data: { id: 43, identifier: "W43", title: "U", status: "in_progress" },
+      });
+      await hooksB["tool.execute.after"]({ input: { command: CLAIM_CMD } }, claimB);
+      const cacheA = JSON.parse(readFileSync(join(dirA, ".stride-env-cache"), "utf8"));
+      const cacheB = JSON.parse(readFileSync(join(dirB, ".stride-env-cache"), "utf8"));
+      expect(cacheA.TASK_ID).toBe("42");
+      expect(cacheB.TASK_ID).toBe("43");
+    } finally {
+      cleanup(dirA);
+      cleanup(dirB);
+    }
+  });
+
+  it("W1496: hook commands on a fresh instance still see the persisted env vars, byte-for-byte", async () => {
+    const dir = await initRepo();
+    try {
+      const title = "Pay $100 via `whoami` \"double\" 'single'";
+      const claimResponse = JSON.stringify({
+        data: { id: 42, identifier: "W42", title, status: "in_progress" },
+      });
+      const instanceA = await instantiate(dir);
+      await instanceA["tool.execute.after"]({ input: { command: CLAIM_CMD } }, claimResponse);
+
+      const instanceB = await instantiate(dir); // restart
+      writeFileSync(
+        join(dir, ".stride.md"),
+        '## after_goal\n\n```bash\necho "title=$TASK_TITLE"\n```\n',
+      );
+      const origOut = process.stdout.write.bind(process.stdout);
+      let stdoutCap = "";
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (process.stdout as any).write = (chunk: unknown) => { stdoutCap += String(chunk); return true; };
+      try {
+        await instanceB["tool.execute.after"](
+          { input: { command: COMPLETE_CMD } },
+          JSON.stringify({ hooks: [{ name: "after_goal" }] }),
+        );
+      } finally {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (process.stdout as any).write = origOut;
+      }
+      const line = stdoutCap.split("\n").find((l) => l.includes('"hook":"after_goal"'));
+      expect(line).toBeDefined();
+      const parsed = JSON.parse(line as string);
+      expect(parsed.status).toBe("success");
+      expect(parsed.commands_output[0].stdout).toBe(`title=${title}\n`);
+    } finally {
+      cleanup(dir);
+    }
+  });
+});

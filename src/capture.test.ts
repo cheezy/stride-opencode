@@ -12,6 +12,9 @@ import {
   putChangedFiles,
   recordDiffUploadState,
   readDiffUploadState,
+  writeEnvCache,
+  readEnvCache,
+  clearEnvCache,
   TRUNC_MARKER,
   BIN_PLACEHOLDER,
   MAX_LINES,
@@ -230,17 +233,19 @@ describe("captureChangedFiles — base ref fallback", () => {
 });
 
 describe("captureChangedFiles — D67 root-artifact exclusion", () => {
-  it("excludes an untracked .stride-diff-upload-state / .stride-changed-files.json while keeping a real change", async () => {
+  it("excludes an untracked .stride-diff-upload-state / .stride-changed-files.json / .stride-env-cache while keeping a real change", async () => {
     const { dir, base } = await initRepo();
     try {
       writeFileSync(join(dir, "a.txt"), "changed\n");
       writeFileSync(join(dir, ".stride-diff-upload-state"), "task_id=42\nhttp_code=200\n");
       writeFileSync(join(dir, ".stride-changed-files.json"), "[]\n");
+      writeFileSync(join(dir, ".stride-env-cache"), '{"TASK_ID":"42"}\n');
       const result = await captureChangedFiles($, dir, base);
       const paths = result.map((f) => f.path);
       expect(paths).toContain("a.txt");
       expect(paths).not.toContain(".stride-diff-upload-state");
       expect(paths).not.toContain(".stride-changed-files.json");
+      expect(paths).not.toContain(".stride-env-cache");
     } finally {
       cleanup(dir);
     }
@@ -272,10 +277,12 @@ describe("captureChangedFiles — D67 root-artifact exclusion", () => {
       mkdirSync(join(dir, "sub"));
       writeFileSync(join(dir, "sub", ".stride-diff-upload-state"), "user data\n");
       writeFileSync(join(dir, "sub", ".stride-changed-files.json"), "user snapshot\n");
+      writeFileSync(join(dir, "sub", ".stride-env-cache"), "user cache\n");
       const result = await captureChangedFiles($, dir, base);
       const paths = result.map((f) => f.path);
       expect(paths).toContain("sub/.stride-diff-upload-state");
       expect(paths).toContain("sub/.stride-changed-files.json");
+      expect(paths).toContain("sub/.stride-env-cache");
     } finally {
       cleanup(dir);
     }
@@ -517,6 +524,76 @@ describe("recordDiffUploadState / readDiffUploadState (W1094)", () => {
     const dir = mkdtempSync(join(tmpdir(), "stride-state-"));
     try {
       expect(await readDiffUploadState(dir)).toBeNull();
+    } finally {
+      cleanup(dir);
+    }
+  });
+});
+
+describe("writeEnvCache / readEnvCache / clearEnvCache (W1496)", () => {
+  it("round-trips a cache with special characters in values — and never a token", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "stride-envcache-"));
+    try {
+      const env = {
+        TASK_ID: "42",
+        TASK_TITLE: "Pay $100 via `whoami` \"double\" 'single'",
+        TASK_BASE_REF: "abc123",
+      };
+      await writeEnvCache(dir, env);
+      expect(await readEnvCache(dir)).toEqual(env);
+      const text = require("node:fs").readFileSync(
+        join(dir, ".stride-env-cache"),
+        "utf8",
+      );
+      expect(text).not.toMatch(/Bearer|stride_dev_/);
+    } finally {
+      cleanup(dir);
+    }
+  });
+
+  it("returns {} when the cache file is absent", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "stride-envcache-"));
+    try {
+      expect(await readEnvCache(dir)).toEqual({});
+    } finally {
+      cleanup(dir);
+    }
+  });
+
+  it("degrades malformed JSON to {} without throwing", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "stride-envcache-"));
+    try {
+      writeFileSync(join(dir, ".stride-env-cache"), "{not json");
+      expect(await readEnvCache(dir)).toEqual({});
+    } finally {
+      cleanup(dir);
+    }
+  });
+
+  it("rejects non-object shapes and drops non-string values", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "stride-envcache-"));
+    try {
+      writeFileSync(join(dir, ".stride-env-cache"), '["a"]\n');
+      expect(await readEnvCache(dir)).toEqual({});
+      writeFileSync(
+        join(dir, ".stride-env-cache"),
+        '{"TASK_ID": 42, "TASK_TITLE": "ok"}\n',
+      );
+      expect(await readEnvCache(dir)).toEqual({ TASK_TITLE: "ok" });
+    } finally {
+      cleanup(dir);
+    }
+  });
+
+  it("clearEnvCache removes the file and tolerates a missing file", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "stride-envcache-"));
+    try {
+      await writeEnvCache(dir, { TASK_ID: "42" });
+      expect(existsSync(join(dir, ".stride-env-cache"))).toBe(true);
+      await clearEnvCache(dir);
+      expect(existsSync(join(dir, ".stride-env-cache"))).toBe(false);
+      // Second clear on the already-missing file resolves without throwing.
+      await clearEnvCache(dir);
     } finally {
       cleanup(dir);
     }

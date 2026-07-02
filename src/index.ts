@@ -13,6 +13,9 @@ import {
   putChangedFiles,
   recordDiffUploadState,
   readDiffUploadState,
+  writeEnvCache,
+  readEnvCache,
+  clearEnvCache,
 } from "./capture";
 
 // Re-export parser functions for backwards compatibility
@@ -27,6 +30,10 @@ export {
   putChangedFiles,
   recordDiffUploadState,
   readDiffUploadState,
+  writeEnvCache,
+  readEnvCache,
+  clearEnvCache,
+  ENV_CACHE_FILE,
   AUTH_FILE,
   TRUNC_MARKER,
   BIN_PLACEHOLDER,
@@ -272,12 +279,21 @@ export const StridePlugin: Plugin = async (input) => {
     }
   }
 
+  // (W1496) Lazily rehydrate the env cache from disk after a plugin restart.
+  // Only fires when the in-memory cache is empty; a populated cache always
+  // wins. Mirrors the bash hook's source-the-cache-every-invocation pattern.
+  async function loadEnvCacheIfEmpty(): Promise<void> {
+    if (Object.keys(envCache).length > 0) return;
+    envCache = await readEnvCache(projectDir);
+  }
+
   // Write the changed-files snapshot after after_doing succeeds, then
   // fire-and-forget PUT it to the Stride server (G162 + G174). The on-disk
   // snapshot is preserved so legacy --argjson cf consumers on older
   // deployments still read it; the PUT carries the new wire-shape
   // ({changed_files: [...]}) to v1.16.0+ servers.
   async function finalizeAfterDoing(command: string): Promise<void> {
+    await loadEnvCacheIfEmpty();
     let snapshot: { path: string; diff: string }[] = [];
     try {
       snapshot = await captureChangedFiles(
@@ -320,6 +336,7 @@ export const StridePlugin: Plugin = async (input) => {
   // so it verifies the recorded outcome and re-captures + re-PUTs when no
   // healthy upload is on record for the current task. Best-effort: never throws.
   async function selfHealChangedFilesUpload(command: string): Promise<void> {
+    await loadEnvCacheIfEmpty();
     const taskId = envCache.TASK_ID;
     if (!taskId) return;
 
@@ -364,6 +381,7 @@ export const StridePlugin: Plugin = async (input) => {
     hookName: HookName,
     commands: string[],
   ): Promise<HookResult> {
+    await loadEnvCacheIfEmpty();
     // (D95) The env cache rides the child environment, never shell text, so
     // user-controlled values (e.g. task titles) cannot inject shell syntax.
     // process.env is filtered because undefined values are not env data.
@@ -504,15 +522,19 @@ export const StridePlugin: Plugin = async (input) => {
             : output?.output ||
               (output as { result?: string })?.result ||
               "";
+        let envExtracted = false;
         if (responseText) {
+          // (W1496) Fresh assignment, not a merge — a prior task's leftover
+          // fields must not survive into the new claim (mirrors the bash
+          // hook's truncating rewrite of .stride-env-cache on claim).
           envCache = {
-            ...envCache,
             ...extractEnvFromResponse(
               typeof responseText === "string"
                 ? responseText
                 : JSON.stringify(responseText),
             ),
           };
+          envExtracted = true;
         }
         // Capture current git HEAD as TASK_BASE_REF so capture_changed_files
         // has an anchor when after_doing runs. Best-effort — non-git
@@ -523,6 +545,14 @@ export const StridePlugin: Plugin = async (input) => {
         // task (W1094 — a stale 2xx would suppress the new task's self-heal).
         await clearStaleSnapshot();
         await clearDiffUploadState();
+        // (W1496) Persist the fully-populated cache so a host restart between
+        // claim and complete doesn't lose TASK_ID/TASK_BASE_REF. Overwrites
+        // any prior task's cache file. Gated on a successful extraction so a
+        // claim with no readable response can't persist a stale prior-task
+        // cache that was previously memory-only.
+        if (envExtracted) {
+          await writeEnvCache(projectDir, envCache);
+        }
       }
 
       // (W1094) Changed-files upload self-heal — runs on the FRESH before_review
@@ -571,6 +601,11 @@ export const StridePlugin: Plugin = async (input) => {
         envCache = {};
         await clearStaleSnapshot();
         await clearDiffUploadState();
+        // (W1496) Remove the persisted cache too, so the cleared in-memory
+        // state can't be rehydrated from disk. (The bash hook's after_goal
+        // carve-out — keeping the cache when after_goal was just routed — is
+        // out of scope here; opencode has always cleared unconditionally.)
+        await clearEnvCache(projectDir);
       }
 
       // --- After-goal routing (W793 / mirrors stride v1.17.1 W504) ---

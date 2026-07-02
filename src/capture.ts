@@ -59,6 +59,12 @@ export const BIN_PLACEHOLDER = "[binary file — no diff captured]";
 export const MAX_LINES = 500;
 
 /**
+ * Filename of the persisted claim env cache (W1496; mirrors the role of
+ * stride-hook.sh's .stride-env-cache, JSON format instead of shell-source).
+ */
+export const ENV_CACHE_FILE = ".stride-env-cache";
+
+/**
  * Capture the per-file diff snapshot.
  *
  * @param $ - Bun shell helper (from the plugin's `Plugin` context)
@@ -92,14 +98,16 @@ export async function captureChangedFiles(
   const untrackedSet = new Set(splitLines(untracked));
 
   // (D67) Exclude the hook's OWN root bookkeeping artifacts from the snapshot:
-  // .stride-diff-upload-state and .stride-changed-files.json otherwise pass both
-  // the tracked-diff and untracked-not-gitignored nets and leak into a task's
-  // changed_files. git emits repo-root-relative paths, so an exact-equality
-  // match is anchored to the repo root — a same-named file in a subdirectory
-  // (e.g. sub/.stride-diff-upload-state) keeps its path prefix and is captured.
+  // .stride-diff-upload-state, .stride-changed-files.json, and (W1496)
+  // .stride-env-cache otherwise pass both the tracked-diff and
+  // untracked-not-gitignored nets and leak into a task's changed_files. git
+  // emits repo-root-relative paths, so an exact-equality match is anchored to
+  // the repo root — a same-named file in a subdirectory (e.g.
+  // sub/.stride-diff-upload-state) keeps its path prefix and is captured.
   const ROOT_ARTIFACTS = new Set([
     ".stride-diff-upload-state",
     ".stride-changed-files.json",
+    ENV_CACHE_FILE,
   ]);
 
   // Dedupe by path (tracked and untracked should not overlap, but the Set
@@ -439,5 +447,64 @@ export async function readDiffUploadState(
     return { taskId, httpCode };
   } catch {
     return null;
+  }
+}
+
+/**
+ * (W1496) Persist the claim env cache to `${projectDir}/.stride-env-cache` so
+ * a host restart between claim and complete does not lose TASK_ID and
+ * TASK_BASE_REF. Holds task metadata only — the API token is resolved from
+ * .stride_auth.md and must NEVER be written here. Best-effort: a failed write
+ * must never block the claim.
+ */
+export async function writeEnvCache(
+  projectDir: string,
+  env: Record<string, string>,
+): Promise<void> {
+  try {
+    await Bun.write(
+      `${projectDir}/${ENV_CACHE_FILE}`,
+      JSON.stringify(env, null, 2) + "\n",
+    );
+  } catch {
+    // best-effort — never block on a failed state write
+  }
+}
+
+/**
+ * (W1496) Read the persisted claim env cache, or `{}` when the file is
+ * absent, unreadable, or malformed — corrupt state degrades to the
+ * empty-cache behaviour, never a throw. Only string-valued entries of a
+ * plain JSON object are accepted.
+ */
+export async function readEnvCache(
+  projectDir: string,
+): Promise<Record<string, string>> {
+  try {
+    const file = Bun.file(`${projectDir}/${ENV_CACHE_FILE}`);
+    if (!(await file.exists())) return {};
+    const parsed: unknown = JSON.parse(await file.text());
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return {};
+    }
+    const env: Record<string, string> = {};
+    for (const [key, value] of Object.entries(parsed)) {
+      if (typeof value === "string") env[key] = value;
+    }
+    return env;
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * (W1496) Remove the persisted claim env cache — the after_review cleanup
+ * counterpart to writeEnvCache. Missing file is the expected path.
+ */
+export async function clearEnvCache(projectDir: string): Promise<void> {
+  try {
+    await Bun.file(`${projectDir}/${ENV_CACHE_FILE}`).unlink();
+  } catch {
+    // File didn't exist — that's the expected path
   }
 }
