@@ -344,6 +344,7 @@ curl -X PATCH "$STRIDE_API_URL/api/tasks/$TASK_ID/complete" \
   -H 'Content-Type: application/json' \
   -d "$(jq -n \
     --arg agent_name 'OpenCode' \
+    --arg skills_version '1.25.0' \
     --arg notes 'All tests passing. PR #123 created.' \
     --arg summary 'Brief one-line summary for tracking.' \
     --arg complexity 'small' \
@@ -351,6 +352,7 @@ curl -X PATCH "$STRIDE_API_URL/api/tasks/$TASK_ID/complete" \
     --arg report '## Review Summary\n\nApproved — 0 issues found.' \
     '{
        agent_name: $agent_name,
+       skills_version: $skills_version,
        time_spent_minutes: 45,
        completion_notes: $notes,
        completion_summary: $summary,
@@ -378,6 +380,7 @@ match the `--arg` substitutions above):
 ```json
 {
   "agent_name": "OpenCode",
+  "skills_version": "1.25.0",
   "time_spent_minutes": 45,
   "completion_notes": "All tests passing. PR #123 created.",
   "completion_summary": "Brief one-line summary for tracking.",
@@ -927,6 +930,7 @@ Reason enum: no_subagent_support, small_task_0_1_key_files, trivial_change_docs_
 | `reviewer_result` | object | Yes | `task-reviewer` custom agent dispatch result OR self-reported skip. See Explorer/Reviewer Result Schema section. |
 | `review_report` | string | No | Structured review report from task-reviewer custom agent. Include when a review was performed; omit when no review was done. |
 | `changed_files` | array | No | Per-file diff entries — back-compat only for ≤ v1.15.x servers; see the **Per-File Diff Capture (Optional)** section |
+| `skills_version` | string | No | The installed `opencode-stride` package version (from `package.json`) — optional; powers the server's `skills_update_required` staleness nudge |
 
 **WRONG — actual_files_changed as array:**
 ```json
@@ -964,22 +968,30 @@ Both `after_doing_result` and `before_review_result` use the same format:
 
 ## Handling Stale Skills
 
-The API response may include a `skills_update_required` field when your skills are outdated:
+Send `skills_version` (the `opencode-stride` `package.json` version) on claim
+and complete so the server can compare it against the current release. When
+your skills are outdated, the API response includes a
+`skills_update_required` field:
 
 ```json
 {
   "data": { ... },
   "skills_update_required": {
-    "current_version": "1.1",
-    "your_version": "1.0",
-    "action": "Run `npm install opencode-stride@latest` to get the latest skills",
+    "current_version": "1.26.0",
+    "your_version": "1.25.0",
+    "action": "Update your stride-opencode skills to the latest release",
     "reason": "Your local skills are outdated."
   }
 }
 ```
 
 **When you see `skills_update_required`:**
-1. Run `npm install opencode-stride@latest` to get the latest skills
+1. Update the skills the same way they were installed (README Step 2): re-clone
+   the repository at the latest tag and copy the skills/agents back into your
+   project — `git clone https://github.com/cheezy/stride-opencode.git` then
+   `cp -R stride-opencode/skills/. .opencode/skills/`. If your `opencode.json`
+   pins the plugin to a tag (`github:cheezy/stride-opencode#v<tag>`), bump the
+   pin to the latest release too.
 2. Retry your original action
 
 ## Arriving from stride-workflow

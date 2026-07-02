@@ -223,6 +223,7 @@ Call `POST /api/tasks/claim` directly with:
 {
   "identifier": "<task identifier>",
   "agent_name": "OpenCode",
+  "skills_version": "1.25.0",
   "before_doing_result": {
     "exit_code": 0,
     "output": "Executed by OpenCode hooks system",
@@ -230,6 +231,11 @@ Call `POST /api/tasks/claim` directly with:
   }
 }
 ```
+
+`skills_version` is optional: send the installed `opencode-stride` package
+version (read it from the plugin's `package.json` `version` field — never
+hardcode a value that will rot) so the server can reply with
+`skills_update_required` when your skills are stale.
 
 The `hooks.json` `tool.execute.after` handler automatically executes `.stride.md` `## before_doing` commands after the claim succeeds. If the automatic hook fails, fix the issue and retry the claim call.
 
@@ -530,6 +536,7 @@ Call `PATCH /api/tasks/:id/complete` with ALL required fields:
 ```json
 {
   "agent_name": "OpenCode",
+  "skills_version": "1.25.0",
   "time_spent_minutes": 45,
   "completion_notes": "Summary of what was done and key decisions made.",
   "completion_summary": "Brief one-line summary for tracking.",
@@ -586,6 +593,7 @@ Call `PATCH /api/tasks/:id/complete` with ALL required fields:
 | Field | Type | Notes |
 |---|---|---|
 | `review_report` | string | Include when task-reviewer ran; omit when skipped |
+| `skills_version` | string | The installed `opencode-stride` package version (from `package.json`) — powers the server's `skills_update_required` staleness nudge |
 
 ---
 
@@ -742,7 +750,7 @@ The server is rolling out hard enforcement behind a feature flag `:strict_comple
 - Each child task follows this full workflow independently
 
 ### Skills update required
-- If any API response includes `skills_update_required`, update the plugin and retry
+- If any API response includes `skills_update_required` (fired when the `skills_version` you sent trails the current release), update your skills the way they were installed — re-clone the repository and copy `skills/` back into `.opencode/skills/`, and bump any `github:cheezy/stride-opencode#v<tag>` pin in `opencode.json` (see "Handling Stale Skills" in `stride-claiming-tasks` / `stride-completing-tasks`) — then retry
 
 ---
 

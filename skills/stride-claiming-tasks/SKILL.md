@@ -340,6 +340,7 @@ POST /api/tasks/claim
 {
   "identifier": "W47",
   "agent_name": "OpenCode",
+  "skills_version": "1.25.0",
   "before_doing_result": {
     "exit_code": 0,
     "output": "Already up to date.\nResolving Hex dependencies...\nAll dependencies are up to date",
@@ -349,6 +350,13 @@ POST /api/tasks/claim
 ```
 
 **Critical:** `before_doing_result` is REQUIRED. The API will reject requests without it.
+
+**`skills_version` (optional):** send the installed `opencode-stride` package
+version — read it from the plugin's `package.json` `version` field; never
+hardcode a value that will rot. The server compares it against the current
+release and replies with `skills_update_required` when your skills are stale
+(see "Handling Stale Skills" below). Omitting the field is valid, but then the
+staleness nudge can never fire for you.
 
 ## Red Flags - STOP
 
@@ -542,25 +550,34 @@ The `POST /api/tasks/claim` body MUST include:
 | `identifier` | string | `"W47"` |
 | `agent_name` | string | `"OpenCode"` |
 | `before_doing_result` | object | See hook result format above |
+| `skills_version` | string (optional) | `"1.25.0"` — the installed `opencode-stride` package version (from `package.json`); powers the staleness nudge, not server-required |
 
 ## Handling Stale Skills
 
-The API response may include a `skills_update_required` field when your skills are outdated:
+Send `skills_version` (the `opencode-stride` `package.json` version) on claim
+and complete so the server can compare it against the current release. When
+your skills are outdated, the API response includes a
+`skills_update_required` field:
 
 ```json
 {
   "data": { ... },
   "skills_update_required": {
-    "current_version": "1.1",
-    "your_version": "1.0",
-    "action": "Run `npm install opencode-stride@latest` to get the latest skills",
+    "current_version": "1.26.0",
+    "your_version": "1.25.0",
+    "action": "Update your stride-opencode skills to the latest release",
     "reason": "Your local skills are outdated."
   }
 }
 ```
 
 **When you see `skills_update_required`:**
-1. Run `npm install opencode-stride@latest` to get the latest skills
+1. Update the skills the same way they were installed (README Step 2): re-clone
+   the repository at the latest tag and copy the skills/agents back into your
+   project — `git clone https://github.com/cheezy/stride-opencode.git` then
+   `cp -R stride-opencode/skills/. .opencode/skills/`. If your `opencode.json`
+   pins the plugin to a tag (`github:cheezy/stride-opencode#v<tag>`), bump the
+   pin to the latest release too.
 2. Retry your original action
 
 ---
