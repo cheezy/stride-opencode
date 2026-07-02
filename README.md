@@ -6,7 +6,7 @@ This plugin provides three things:
 
 1. A **TypeScript plugin** that intercepts Stride API calls and runs `.stride.md` hooks automatically (via `tool.execute.before` / `tool.execute.after` events).
 2. Seven **skills** (`stride-workflow` orchestrator plus six phase-specific skills) loaded into `.opencode/skills/` and invoked via OpenCode's native `skill` tool.
-3. Four **subagents** (`task-explorer`, `task-reviewer`, `task-decomposer`, `hook-diagnostician`) loaded into `.opencode/agents/` and invoked via `@mention` in chat.
+3. Five **subagents** (`task-explorer`, `task-enricher`, `task-reviewer`, `task-decomposer`, `hook-diagnostician`) loaded into `.opencode/agents/` and invoked via `@mention` in chat.
 
 ## Installation
 
@@ -24,7 +24,7 @@ Add the plugin to your project's `opencode.json` or global `~/.config/opencode/o
 
 OpenCode installs plugins automatically using **Bun** at startup, caching them under `~/.cache/opencode/node_modules/`. See [OpenCode's plugins docs](https://opencode.ai/docs/plugins/) for details.
 
-> **npm package status:** The `opencode-stride` npm package is not currently published. Use the `github:cheezy/stride-opencode` reference above. If you need pinning, add a ref: `github:cheezy/stride-opencode#v1.4.0` (branch, tag, or commit SHA). OpenCode's docs only document npm package names in `"plugin"`, but Bun resolves `github:owner/repo` references as npm-install targets, so this works.
+> **npm package status:** The `opencode-stride` npm package is not currently published. Use the `github:cheezy/stride-opencode` reference above. If you need pinning, add a ref: `github:cheezy/stride-opencode#v1.25.0` (branch, tag, or commit SHA). OpenCode's docs only document npm package names in `"plugin"`, but Bun resolves `github:owner/repo` references as npm-install targets, so this works.
 
 Alternatively, if you prefer not to auto-install, clone the repo into a local plugin directory:
 
@@ -50,7 +50,7 @@ git clone https://github.com/cheezy/stride-opencode.git /tmp/stride-opencode
 mkdir -p .opencode/skills
 cp -R /tmp/stride-opencode/skills/. .opencode/skills/
 
-# Copy the 4 subagent markdown files
+# Copy the 5 subagent markdown files
 mkdir -p .opencode/agents
 cp /tmp/stride-opencode/agents/*.md .opencode/agents/
 
@@ -214,13 +214,14 @@ The `stride-creating-tasks`, `stride-enriching-tasks`, and `stride-workflow` ski
 | Agent | Mode | Purpose |
 |-------|------|---------|
 | `task-explorer` | subagent | Explore key_files and patterns before implementation |
+| `task-enricher` | subagent | Enrich a sparse task before claiming |
 | `task-reviewer` | subagent | Review changes against acceptance criteria before completion |
 | `task-decomposer` | subagent | Break goals into dependency-ordered child tasks |
 | `hook-diagnostician` | subagent | Diagnose hook failures with prioritized fix plans |
 
 Invoke agents via `@mention` in chat (e.g., `@task-explorer`) or automatically by the `stride-subagent-workflow` skill based on task complexity. See [OpenCode's agents docs](https://opencode.ai/docs/agents/) for the frontmatter fields supported (description, mode, model, temperature, permission).
 
-The `task-reviewer` emits a structured `reviewer_result` JSON block (**schema 1.3**) — `status`, `issue_counts`, `issues[]`, `acceptance_criteria[]`, `project_checks[]` (parsed from a project `CODE-REVIEW.md`), and the per-section `testing_strategy` / `patterns` / `pitfalls` / `security_considerations` verdicts — `security_considerations` is the fifth review_queue-scored field. The orchestrator extracts that block and persists it verbatim into the completion payload (merged with the legacy summary fields) so the Stride review queue renders the full review rather than a bare issue count. The schema is owned by `agents/task-reviewer.md`.
+The `task-reviewer` emits a structured `reviewer_result` JSON block (**schema 1.4**) — `status`, `issue_counts`, `issues[]`, `acceptance_criteria[]`, `project_checks[]` (parsed from a project `CODE-REVIEW.md`), and the per-section `testing_strategy` / `patterns` / `pitfalls` / `security_considerations` verdicts — `security_considerations` is the fifth review_queue-scored field. The orchestrator extracts that block and persists it verbatim into the completion payload (merged with the legacy summary fields) so the Stride review queue renders the full review rather than a bare issue count. The schema is owned by `agents/task-reviewer.md`.
 
 ## Commands
 

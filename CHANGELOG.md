@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed — README and AGENTS.md accuracy drift (D97)
+
+Surface docs contradicted the shipped plugin: README and AGENTS.md said the reviewer emits **schema 1.3** while `agents/task-reviewer.md` declares `schema_version` **1.4**; both documented **four** subagents while **five** ship (`task-enricher` exists, is dispatched by `stride-subagent-workflow`, and was invisible in the docs); and the README's install-pin example referenced the ancient `#v1.4.0` tag. All corrected — schema references bumped to 1.4, `task-enricher` documented in the README subagents table and the AGENTS.md agent list, the copy-the-agent-files step says five files, and the pin example uses the current release tag.
+
+### Correction — historical install-method claims
+
+The 1.17.0, 1.16.0, and 1.14.0 entries below state that consumers install via plain `npm install opencode-stride`. That claim predates the discovery that the npm package is unpublished; those entries stay as written — history is not rewritten. The current install method is README Step 1: the `github:cheezy/stride-opencode` reference in `opencode.json` (pin with `#v<tag>`), with skills/agents copied per README Step 2.
+
 ## [1.25.0] - 2026-07-02
 
 ### Added — `skills_version` documented on the claim and complete payloads (W1500)
