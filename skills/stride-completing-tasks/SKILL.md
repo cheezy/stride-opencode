@@ -428,7 +428,7 @@ thin legacy envelope — it strips the issues, acceptance verdicts, and code-rev
 checks the reviewer produced. See **Shape 2** below for the full rich block;
 extract the fenced ` ```json ` block per the **`stride-workflow` skill,
 "Extracting the structured review block" (Step 6)**; the block's schema is owned
-by `stride/agents/task-reviewer.md`. The reviewer's full prose+JSON response is
+by `agents/task-reviewer.md`. The reviewer's full prose+JSON response is
 saved separately as `review_report`.
 
 **Critical:** `after_doing_result`, `before_review_result`, `explorer_result`, `reviewer_result`, and `workflow_steps` are all REQUIRED. The API will reject requests without them.
@@ -641,7 +641,7 @@ the `stride-workflow` skill's "Extracting the structured review block" (Step 6)
 — that section owns the legacy↔structured field mapping (e.g. `issues_found =
 sum(issue_counts)`, `acceptance_criteria_checked = len(acceptance_criteria)`).
 The structured block's schema itself is owned by
-`stride/agents/task-reviewer.md`; do not redefine it here. The legacy
+`agents/task-reviewer.md`; do not redefine it here. The legacy
 `acceptance_criteria_checked` and `issues_found` integers remain required (for
 back-compat) when `dispatched` is `true`. If the reviewer emitted no parseable
 ` ```json ` fence, fall back to the legacy-only envelope and omit the structured
@@ -886,7 +886,7 @@ REQUIRED BODY: {
 reviewer_result (dispatched) = the task-reviewer agent's fenced ```json block
 (schema_version/status/issue_counts/issues[]/acceptance_criteria[]/project_checks[]/testing_strategy/patterns/pitfalls/security_considerations)
 merged with dispatched:true + duration_ms + derived legacy issues_found/acceptance_criteria_checked.
-See stride-workflow Step 6 for extraction; schema owned by stride/agents/task-reviewer.md.
+See stride-workflow Step 6 for extraction; schema owned by agents/task-reviewer.md.
 
 SKIP FORM for explorer_result / reviewer_result (when subagent not dispatched):
   {"dispatched": false, "reason": "<enum>", "summary": "<40+ non-whitespace chars>"}

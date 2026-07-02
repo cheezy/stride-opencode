@@ -300,7 +300,7 @@ Follow:
 
 **Re-review and follow-up rounds — preserve the canonical criteria list (D66).** When you re-invoke the `task-reviewer` agent to re-verify after fixing issues from a `changes_requested` round, the follow-up invocation MUST pass the task's `acceptance_criteria` field **unchanged** and instruct the reviewer to keep its `acceptance_criteria` array **identical to the task's canonical list** — one entry per criterion line, verbatim and in the task's order, never split, merged, reworded, added, or dropped (the same 1:1 hard rule the reviewer schema enforces in `agents/task-reviewer.md`). Never hand the re-review only the issues you fixed and let it re-derive the criteria: a re-review that re-enumerates the criteria in its own words corrupts the persisted count — this is exactly how a re-review round turned a 5-criterion task into a `6/5` review display.
 
-The reviewer returns a human-readable prose summary followed by a fenced ```json block. The schema of that block is owned by `stride/agents/task-reviewer.md` — do not duplicate field definitions here.
+The reviewer returns a human-readable prose summary followed by a fenced ```json block. The schema of that block is owned by `agents/task-reviewer.md` — do not duplicate field definitions here.
 
 - **Fix all Critical issues** before proceeding
 - **Fix all Important issues** before proceeding
