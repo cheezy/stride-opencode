@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.24.1] - 2026-07-02
+
+### Fixed — the changed-files PUT can no longer stall the after_doing gate (W1498)
+
+`putChangedFiles` awaited `fetch` with no timeout, and the call is awaited inside the blocking `after_doing` gate — a hung or very slow server stalled task completion indefinitely, even though the upload is explicitly best-effort.
+
+- **`src/capture.ts`** — the PUT fetch now carries `signal: AbortSignal.timeout(PUT_TIMEOUT_MS)` (exported, 10 seconds — generous enough for large diffs on slow links). An abort rejects into the existing transport-failure catch: return `0` plus the tokenless stderr warning, so the W1094 upload-state records `http_code=0` and the `before_review` self-heal retries. Success and non-2xx behavior is byte-for-byte unchanged.
+- **`src/capture.test.ts`** — three new tests: the fetch receives an `AbortSignal` and the constant is 10 000 ms; an `AbortError` yields `0` with the warning and no token in the output; a timed-out attempt round-trips through the upload-state as `http_code="0"`, which fails the `/^2/` healthy check so the self-heal retries.
+
+### Backward compatibility
+
+No wire-shape change; the only behavioral difference is that a PUT hanging past 10 seconds now aborts into the pre-existing transport-failure path instead of blocking forever. Bugfix patch (1.24.0 → 1.24.1).
+
+### Source
+
+W1498.
+
 ## [1.24.0] - 2026-07-02
 
 ### Changed — the changed-files completion contract in `stride-completing-tasks` (W1499)
