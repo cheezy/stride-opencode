@@ -65,10 +65,10 @@ When skills reference Claude Code tool names, use OpenCode equivalents:
 
 | Skill Reference | OpenCode Tool |
 |----------------|---------------|
-| `Read` | `read_file` |
-| `Grep` | `grep_search` |
+| `Read` | `read` |
+| `Grep` | `grep` |
 | `Glob` | `glob` |
-| `Bash` | `shell` |
-| `Edit` | `edit_file` |
-| `Write` | `write_file` |
+| `Bash` | `bash` |
+| `Edit` | `edit` |
+| `Write` | `write` |
 | `Agent` | `@agent-name` (subagent mention) |

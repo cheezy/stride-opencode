@@ -123,7 +123,7 @@ The task-field and batch-shape contracts the creation sub-skills enforce are **n
    ```
 3. **STOP.** Do not proceed to Step 1 (Task Discovery), do not call `GET /api/tasks/next`, do not claim, and do not implement anything. Newly created tasks land in the **Backlog** and are intentionally **not** claimable until a human reviews them and promotes them to Ready.
 
-This mirrors the `stride-ideation` skill, whose terminal state is the written requirements document — it does not auto-invoke `/stridify` or push the user toward any next step. **Creating work and doing work are separate, explicitly-invoked actions.** Building a created task is a fresh request to work the task — e.g. `/stride-build` (which re-enters this orchestrator at Step 0) — made by the user's choice, never an automatic continuation of creation.
+This mirrors the `stride-ideation` skill, whose terminal state is the written requirements document — it does not auto-invoke `/stridify` or push the user toward any next step. **Creating work and doing work are separate, explicitly-invoked actions.** Building a created task is a fresh request to work the task (which re-enters this orchestrator at Step 0), made by the user's choice — never an automatic continuation of creation.
 
 **Do NOT confuse this with the build loop.** Steps 1–9 below are the build path (claim → explore → implement → review → complete → loop). They apply when the user asks to *work* tasks — not when a create command dispatched the creation sub-skill. A creation intent uses Step 0 (marker) + the dispatch above + this terminal state, and nothing else.
 

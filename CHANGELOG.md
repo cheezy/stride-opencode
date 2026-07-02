@@ -15,6 +15,10 @@ Surface docs contradicted the shipped plugin: README and AGENTS.md said the revi
 
 The 1.17.0, 1.16.0, and 1.14.0 entries below state that consumers install via plain `npm install opencode-stride`. That claim predates the discovery that the npm package is unpublished; those entries stay as written — history is not rewritten. The current install method is README Step 1: the `github:cheezy/stride-opencode` reference in `opencode.json` (pin with `#v<tag>`), with skills/agents copied per README Step 2.
 
+### Fixed — wrong OpenCode tool names and a phantom `/stride-build` command (D98)
+
+AGENTS.md's Tool Name Mapping table pointed four of six rows at tools OpenCode doesn't have (`read_file`, `grep_search`, `shell`, `edit_file`, `write_file`); it now matches the README table and the agent frontmatter: `read`, `grep`, `glob`, `bash`, `edit`, `write`. Both command files (`commands/create-goals.md`, `commands/create-tasks.md`) used the same invalid names as live instructions — corrected, preserving the already-correct `glob`. Both command files and `skills/stride-workflow/SKILL.md` also referenced a `/stride-build` command that has never shipped; the wording now matches canonical — building a created task is a fresh request to work the task. Tool vocabulary is now identical across README, AGENTS.md, commands, and agent frontmatter.
+
 ## [1.25.0] - 2026-07-02
 
 ### Added — `skills_version` documented on the claim and complete payloads (W1500)

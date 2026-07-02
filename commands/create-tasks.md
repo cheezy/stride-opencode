@@ -8,7 +8,7 @@ Create one or more Stride work tasks (or defects), optionally informed by a dire
 
 **This command never activates `stride-creating-tasks` directly** — the sub-skill gate would block that. It always goes through `stride-workflow`, which writes the activation marker that permits the dispatch.
 
-When you need to run shell, execute it with `shell`, one command at a time, checking the result before proceeding.
+When you need to run shell, execute it with `bash`, one command at a time, checking the result before proceeding.
 
 ## What to do
 
@@ -23,7 +23,7 @@ The user invoked you with `$ARGUMENTS`. Parse in this fixed order — `--dir` (a
 
 ### Step 2: Validate the context directory
 
-Only when `CONTEXT_DIR` is set, run this via `shell`:
+Only when `CONTEXT_DIR` is set, run this via `bash`:
 
 ```bash
 if [ -n "$CONTEXT_DIR" ]; then
@@ -49,7 +49,7 @@ If `CONTEXT_DIR` is set and contains `.md` files, enumerate and read them — **
 find "$CONTEXT_DIR" -maxdepth 1 -type f -name '*.md'
 ```
 
-Use `glob` to list the markdown files and `read_file` to load each file's contents into `CONTEXT_BUNDLE`. The bundle is **read-only** — consume it as reference material; never edit the source markdown (no `edit_file` / `write_file` on it), and never read files outside `CONTEXT_DIR`.
+Use `glob` to list the markdown files and `read` to load each file's contents into `CONTEXT_BUNDLE`. The bundle is **read-only** — consume it as reference material; never edit the source markdown (no `edit` / `write` on it), and never read files outside `CONTEXT_DIR`.
 
 ### Step 4: Route through the `stride-workflow` orchestrator
 
@@ -63,4 +63,4 @@ Do NOT activate `stride-creating-tasks` yourself. The orchestrator is the only s
 
 ## Terminal state
 
-This command's terminal state is **tasks created** — not tasks built. After the orchestrator dispatches `stride-creating-tasks` and the task(s) are created, it reports the new `W###` / `D###` identifiers and **stops**. It does not claim, start, or implement the work, and it does not continue into a build loop. Newly created tasks land in the **Backlog** and become claimable only after a human promotes them to Ready. Building a created task is a separate, explicitly-invoked action — `/stride-build` (or a fresh request to work the task), which re-enters the `stride-workflow` orchestrator. See the orchestrator's **Creation Terminal State** section.
+This command's terminal state is **tasks created** — not tasks built. After the orchestrator dispatches `stride-creating-tasks` and the task(s) are created, it reports the new `W###` / `D###` identifiers and **stops**. It does not claim, start, or implement the work, and it does not continue into a build loop. Newly created tasks land in the **Backlog** and become claimable only after a human promotes them to Ready. Building a created task is a separate, explicitly-invoked action — a fresh request to work the task, which re-enters the `stride-workflow` orchestrator. See the orchestrator's **Creation Terminal State** section.
