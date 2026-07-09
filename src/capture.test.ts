@@ -937,3 +937,59 @@ describe("writeCanonicalResponse / readCanonicalResponse (W1636)", () => {
     }
   });
 });
+
+// The three-layer after_goal reliability contract at the capture-helper level
+// (W1639 / stride W1612): the canonical file is the truncation-proof source,
+// and getAfterGoalStatus is the file-independent fresh GET of last resort.
+describe("W1639 canonical-file truncation-fallback + fresh-GET contract", () => {
+  it("readCanonicalResponse recovers the after_goal payload a truncated output cannot", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "stride-w1639-"));
+    try {
+      const full = {
+        data: { id: 42 },
+        hooks: [
+          { name: "after_goal", env: { GOAL_ID: "4969", GOAL_IDENTIFIER: "G227" } },
+        ],
+      };
+      // The agent's API curl tees the FULL response here.
+      await writeCanonicalResponse(dir, full);
+      // A truncated view of the same response is not parseable on its own...
+      const truncated = JSON.stringify(full).slice(0, 30);
+      let outputParsed = true;
+      try {
+        JSON.parse(truncated);
+      } catch {
+        outputParsed = false;
+      }
+      expect(outputParsed).toBe(false);
+      // ...but the canonical file still yields the full payload, incl after_goal.
+      const recovered = (await readCanonicalResponse(dir)) as {
+        hooks: { name: string; env: Record<string, string> }[];
+      };
+      expect(recovered.hooks[0].name).toBe("after_goal");
+      expect(recovered.hooks[0].env.GOAL_IDENTIFIER).toBe("G227");
+    } finally {
+      cleanup(dir);
+    }
+  });
+
+  it("getAfterGoalStatus is the file-independent fresh GET (stubbed, no file present)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "stride-w1639-"));
+    const originalFetch = globalThis.fetch;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (globalThis as any).fetch = async () =>
+      new Response(
+        JSON.stringify({ after_goal_armed: true, goal_id: "4969", env: { GOAL_IDENTIFIER: "G227" } }),
+        { status: 200 },
+      );
+    try {
+      // No canonical file at all — the fresh GET does not depend on one.
+      expect(await readCanonicalResponse(dir)).toBeNull();
+      const status = await getAfterGoalStatus("https://stride.example.com", "tok", "42");
+      expect(status).toEqual({ armed: true, goalId: "4969", env: { GOAL_IDENTIFIER: "G227" } });
+    } finally {
+      globalThis.fetch = originalFetch;
+      cleanup(dir);
+    }
+  });
+});

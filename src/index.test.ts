@@ -2259,3 +2259,188 @@ describe("StridePlugin — W1638 fresh-GET after_goal reliability fallback", () 
     }
   });
 });
+
+// End-to-end after_goal reliability under truncation (W1639 / stride W1612):
+// exercises the full claim -> /complete lifecycle through tool.execute.after,
+// proving the section runs and GOAL_* is exported when the host hands the
+// plugin a truncated output, with the canonical file (or the fresh GET) as the
+// source of truth. All side effects are stubbed — no real push, no real server.
+describe("StridePlugin — W1639 end-to-end after_goal under truncation", () => {
+  const originalFetch = globalThis.fetch;
+  let fetchUrls: string[] = [];
+  let afterGoalStatus: () => Response;
+
+  const CLAIM_CMD =
+    'curl -X POST http://localhost/api/tasks/claim -H "Authorization: Bearer tok"';
+  const COMPLETE_CMD =
+    'curl -X PATCH http://localhost/api/tasks/42/complete -H "Authorization: Bearer tok"';
+  const CLAIM_RESPONSE = JSON.stringify({
+    data: { id: 42, identifier: "W42", title: "T", status: "in_progress" },
+  });
+
+  async function initRepo(): Promise<string> {
+    const dir = mkdtempSync(join(tmpdir(), "stride-oc-w1639-"));
+    await $`git init -q`.cwd(dir).quiet();
+    await $`git config user.email "test@test.local"`.cwd(dir).quiet();
+    await $`git config user.name "Test"`.cwd(dir).quiet();
+    writeFileSync(
+      join(dir, ".gitignore"),
+      ".stride.md\n.stride-changed-files.json\n.stride-diff-upload-state\n.stride-env-cache\n.stride/\n",
+    );
+    writeFileSync(join(dir, "tracked.txt"), "v1\n");
+    await $`git add .gitignore tracked.txt`.cwd(dir).quiet();
+    await $`git commit -q -m v1`.cwd(dir).quiet();
+    return dir;
+  }
+  function cleanup(dir: string): void {
+    try { rmSync(dir, { recursive: true, force: true }); } catch { /* best-effort */ }
+  }
+  async function instantiate(dir: string) {
+    return (await StridePlugin({ directory: dir, worktree: dir, $ } as never)) as {
+      "tool.execute.after": (i: unknown, o?: unknown) => Promise<void>;
+    };
+  }
+  function writeAfterGoalSection(dir: string, body = 'echo "goal=$GOAL_IDENTIFIER"'): void {
+    writeFileSync(join(dir, ".stride.md"), `## after_goal\n\n\`\`\`bash\n${body}\n\`\`\`\n`);
+  }
+  // The full /complete response the agent's curl tees to the canonical file.
+  function completeResponseWithAfterGoal(goalIdentifier: string): string {
+    return JSON.stringify({
+      data: { id: 42, identifier: "W42", status: "completed" },
+      hooks: [
+        { name: "after_doing", env: {} },
+        { name: "before_review", env: {} },
+        { name: "after_review", env: {} },
+        { name: "after_goal", env: { GOAL_ID: "4969", GOAL_IDENTIFIER: goalIdentifier } },
+      ],
+    });
+  }
+  async function runComplete(
+    hooks: { "tool.execute.after": (i: unknown, o?: unknown) => Promise<void> },
+    output: unknown,
+  ): Promise<Record<string, unknown> | undefined> {
+    const origOut = process.stdout.write.bind(process.stdout);
+    let stdoutCap = "";
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (process.stdout as any).write = (chunk: unknown) => { stdoutCap += String(chunk); return true; };
+    try {
+      await hooks["tool.execute.after"]({ input: { command: COMPLETE_CMD } }, output);
+    } finally {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (process.stdout as any).write = origOut;
+    }
+    const line = stdoutCap.split("\n").find((l) => l.includes('"hook":"after_goal"'));
+    return line ? (JSON.parse(line) as Record<string, unknown>) : undefined;
+  }
+  const calledStatus = () => fetchUrls.some((u) => u.includes("/after_goal_status"));
+
+  beforeEach(() => {
+    fetchUrls = [];
+    afterGoalStatus = () =>
+      new Response(
+        JSON.stringify({ after_goal_armed: false }),
+        { status: 200 },
+      );
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (globalThis as any).fetch = async (url: string) => {
+      const u = String(url);
+      fetchUrls.push(u);
+      if (u.includes("/after_goal_status")) return afterGoalStatus();
+      return new Response("", { status: 200 });
+    };
+  });
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  it("claim -> truncated /complete with the full response tee'd to the file runs after_goal + exports GOAL_*", async () => {
+    const dir = await initRepo();
+    try {
+      const hooks = await instantiate(dir);
+      // 1. Real claim populates the env cache (TASK_ID, TASK_BASE_REF).
+      await hooks["tool.execute.after"]({ input: { command: CLAIM_CMD } }, CLAIM_RESPONSE);
+      // 2. The agent's /complete curl tees the FULL response to the canonical
+      //    file (overwriting the claim response the plugin captured).
+      mkdirSync(join(dir, ".stride"), { recursive: true });
+      writeFileSync(
+        join(dir, CANONICAL_RESPONSE_FILE),
+        completeResponseWithAfterGoal("G227") + "\n",
+      );
+      writeAfterGoalSection(dir);
+      // 3. opencode hands the plugin a truncated (invalid-JSON) output.
+      const truncated = completeResponseWithAfterGoal("G227").slice(0, 50);
+      const result = await runComplete(hooks, truncated);
+      // The section ran (fast path from the file) and GOAL_IDENTIFIER was
+      // exported to it.
+      expect(result?.status).toBe("success");
+      const commandsOutput = result!.commands_output as { stdout: string }[];
+      expect(commandsOutput[0].stdout).toBe("goal=G227\n");
+      // The fast path handled it — no fresh GET was needed.
+      expect(calledStatus()).toBe(false);
+    } finally {
+      cleanup(dir);
+    }
+  });
+
+  it("a present file with after_goal but no ## after_goal section is a clean no-op", async () => {
+    const dir = await initRepo();
+    try {
+      const hooks = await instantiate(dir);
+      await hooks["tool.execute.after"]({ input: { command: CLAIM_CMD } }, CLAIM_RESPONSE);
+      mkdirSync(join(dir, ".stride"), { recursive: true });
+      writeFileSync(
+        join(dir, CANONICAL_RESPONSE_FILE),
+        completeResponseWithAfterGoal("G227") + "\n",
+      );
+      // .stride.md exists but has NO after_goal section.
+      writeFileSync(join(dir, ".stride.md"), "## before_review\n\n```bash\n```\n");
+      const result = await runComplete(hooks, completeResponseWithAfterGoal("G227").slice(0, 50));
+      // Detected, but nothing to run — a silent no-op (grace worker promotes).
+      expect(result).toBeUndefined();
+      // No fresh GET either: the fast path DETECTED after_goal, it just had no
+      // commands, so the fallback must not fire.
+      expect(calledStatus()).toBe(false);
+    } finally {
+      cleanup(dir);
+    }
+  });
+
+  it("no file + truncated output + armed=false GET does not false-positive", async () => {
+    const dir = await initRepo();
+    try {
+      const hooks = await instantiate(dir);
+      await hooks["tool.execute.after"]({ input: { command: CLAIM_CMD } }, CLAIM_RESPONSE);
+      writeAfterGoalSection(dir);
+      // No canonical file (the claim's capture is the only writer, but the
+      // /complete tee never happened) + a truncated output. The control: the
+      // server reports not-armed, so after_goal must NOT run.
+      rmSync(join(dir, CANONICAL_RESPONSE_FILE), { force: true });
+      const result = await runComplete(hooks, completeResponseWithAfterGoal("G227").slice(0, 50));
+      expect(calledStatus()).toBe(true);
+      expect(result).toBeUndefined();
+    } finally {
+      cleanup(dir);
+    }
+  });
+
+  it("no file + truncated output + armed GET with GOAL_ID omitted uses the goalId fallback", async () => {
+    const dir = await initRepo();
+    try {
+      const hooks = await instantiate(dir);
+      await hooks["tool.execute.after"]({ input: { command: CLAIM_CMD } }, CLAIM_RESPONSE);
+      writeAfterGoalSection(dir, 'echo "gid=$GOAL_ID"');
+      rmSync(join(dir, CANONICAL_RESPONSE_FILE), { force: true });
+      // Armed, goal_id present but GOAL_ID absent from the hook env.
+      afterGoalStatus = () =>
+        new Response(
+          JSON.stringify({ after_goal_armed: true, goal_id: "4969", env: { GOAL_IDENTIFIER: "G227" } }),
+          { status: 200 },
+        );
+      const result = await runComplete(hooks, completeResponseWithAfterGoal("G227").slice(0, 50));
+      const commandsOutput = result!.commands_output as { stdout: string }[];
+      expect(commandsOutput[0].stdout).toBe("gid=4969\n");
+    } finally {
+      cleanup(dir);
+    }
+  });
+});
