@@ -1,5 +1,5 @@
 import { describe, expect, it, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync, existsSync, readFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, existsSync, readFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { $ } from "bun";
@@ -15,6 +15,7 @@ import {
   coerceOutputText,
   peelPayloadRoot,
   responseHasAfterGoal,
+  CANONICAL_RESPONSE_FILE,
   StridePlugin,
 } from "./index";
 
@@ -1833,6 +1834,183 @@ describe("StridePlugin — W1497 server hook env forwarding", () => {
       const line = stdoutCap.split("\n").find((l) => l.includes('"hook":"after_goal"'));
       expect(line).toBeDefined();
       expect(JSON.parse(line as string).status).toBe("success");
+    } finally {
+      cleanup(dir);
+    }
+  });
+});
+
+// The canonical-file preference for after_goal detection + GOAL_* env (W1637).
+// The API curl tees the FULL response to .stride/.last-api-response.json, so
+// when opencode hands the plugin a truncated `output`, detection and env
+// extraction must still succeed by reading the file first.
+describe("StridePlugin — W1637 canonical response file preference", () => {
+  const originalFetch = globalThis.fetch;
+
+  async function initRepo(): Promise<string> {
+    const dir = mkdtempSync(join(tmpdir(), "stride-oc-w1637-"));
+    await $`git init -q`.cwd(dir).quiet();
+    await $`git config user.email "test@test.local"`.cwd(dir).quiet();
+    await $`git config user.name "Test"`.cwd(dir).quiet();
+    writeFileSync(
+      join(dir, ".gitignore"),
+      ".stride.md\n.stride-changed-files.json\n.stride-diff-upload-state\n.stride-env-cache\n.stride/\n",
+    );
+    writeFileSync(join(dir, "tracked.txt"), "v1\n");
+    await $`git add .gitignore tracked.txt`.cwd(dir).quiet();
+    await $`git commit -q -m v1`.cwd(dir).quiet();
+    return dir;
+  }
+  function cleanup(dir: string): void {
+    try { rmSync(dir, { recursive: true, force: true }); } catch { /* best-effort */ }
+  }
+  async function instantiate(dir: string) {
+    return (await StridePlugin({ directory: dir, worktree: dir, $ } as never)) as {
+      "tool.execute.before": (i: unknown, o?: unknown) => Promise<void>;
+      "tool.execute.after": (i: unknown, o?: unknown) => Promise<void>;
+    };
+  }
+
+  const COMPLETE_CMD =
+    'curl -X PATCH http://localhost/api/tasks/42/complete -H "Authorization: Bearer tok"';
+
+  // A full /complete response bundling an after_goal entry with GOAL_* env.
+  function fullResponse(goalIdentifier: string): string {
+    return JSON.stringify({
+      data: { id: 42, identifier: "W42", status: "completed" },
+      hooks: [
+        { name: "after_goal", env: { GOAL_ID: "4969", GOAL_IDENTIFIER: goalIdentifier } },
+      ],
+    });
+  }
+
+  // Write the .stride.md after_goal section that echoes the GOAL_IDENTIFIER so
+  // the emitted HookResult proves which env reached the command.
+  function writeAfterGoalSection(dir: string): void {
+    writeFileSync(
+      join(dir, ".stride.md"),
+      '## after_goal\n\n```bash\necho "goal=$GOAL_IDENTIFIER"\n```\n',
+    );
+  }
+
+  // Run tool.execute.after capturing stdout; return the parsed after_goal
+  // HookResult line, or undefined when the after_goal hook never fired.
+  async function runAfter(
+    hooks: { "tool.execute.after": (i: unknown, o?: unknown) => Promise<void> },
+    output: unknown,
+  ): Promise<Record<string, unknown> | undefined> {
+    const origOut = process.stdout.write.bind(process.stdout);
+    let stdoutCap = "";
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (process.stdout as any).write = (chunk: unknown) => { stdoutCap += String(chunk); return true; };
+    try {
+      await hooks["tool.execute.after"]({ input: { command: COMPLETE_CMD } }, output);
+    } finally {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (process.stdout as any).write = origOut;
+    }
+    const line = stdoutCap.split("\n").find((l) => l.includes('"hook":"after_goal"'));
+    return line ? (JSON.parse(line) as Record<string, unknown>) : undefined;
+  }
+
+  beforeEach(() => {
+    // The before_review self-heal may resolve creds and attempt a PUT; stub
+    // fetch so no test touches the network.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (globalThis as any).fetch = async () => new Response("", { status: 200 });
+  });
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  it("detects after_goal and forwards GOAL_* env from the file under a TRUNCATED output", async () => {
+    const dir = await initRepo();
+    try {
+      const hooks = await instantiate(dir);
+      writeAfterGoalSection(dir);
+      // The curl tee'd the full response to the canonical file...
+      mkdirSync(join(dir, ".stride"), { recursive: true });
+      writeFileSync(join(dir, CANONICAL_RESPONSE_FILE), fullResponse("G227") + "\n");
+      // ...but opencode handed the plugin a truncated (invalid-JSON) output.
+      const truncated = fullResponse("G227").slice(0, 40);
+      const result = await runAfter(hooks, truncated);
+      expect(result).toBeDefined();
+      expect(result!.status).toBe("success");
+      // GOAL_IDENTIFIER came from the canonical file, not the truncated output.
+      const commandsOutput = result!.commands_output as { stdout: string }[];
+      expect(commandsOutput[0].stdout).toBe("goal=G227\n");
+    } finally {
+      cleanup(dir);
+    }
+  });
+
+  it("captures a complete valid output to the canonical file", async () => {
+    const dir = await initRepo();
+    try {
+      const hooks = await instantiate(dir);
+      writeAfterGoalSection(dir);
+      // No pre-existing file — a valid output must be captured to it.
+      expect(existsSync(join(dir, CANONICAL_RESPONSE_FILE))).toBe(false);
+      const result = await runAfter(hooks, fullResponse("G227"));
+      expect(existsSync(join(dir, CANONICAL_RESPONSE_FILE))).toBe(true);
+      const captured = JSON.parse(readFileSync(join(dir, CANONICAL_RESPONSE_FILE), "utf8"));
+      expect(captured).toEqual(JSON.parse(fullResponse("G227")));
+      // And detection still fires (back-compat: valid output alone works).
+      expect(result?.status).toBe("success");
+    } finally {
+      cleanup(dir);
+    }
+  });
+
+  it("a valid current output overwrites a stale prior-call canonical file", async () => {
+    const dir = await initRepo();
+    try {
+      const hooks = await instantiate(dir);
+      writeAfterGoalSection(dir);
+      // A stale file names a different goal...
+      mkdirSync(join(dir, ".stride"), { recursive: true });
+      writeFileSync(join(dir, CANONICAL_RESPONSE_FILE), fullResponse("G_STALE") + "\n");
+      // ...the current VALID output must overwrite it and its env must win.
+      const result = await runAfter(hooks, fullResponse("G227"));
+      const captured = JSON.parse(readFileSync(join(dir, CANONICAL_RESPONSE_FILE), "utf8"));
+      expect(captured.hooks[0].env.GOAL_IDENTIFIER).toBe("G227");
+      const commandsOutput = result!.commands_output as { stdout: string }[];
+      expect(commandsOutput[0].stdout).toBe("goal=G227\n");
+    } finally {
+      cleanup(dir);
+    }
+  });
+
+  it("heals an invalid-JSON canonical file from a valid output", async () => {
+    const dir = await initRepo();
+    try {
+      const hooks = await instantiate(dir);
+      writeAfterGoalSection(dir);
+      // A corrupt/truncated prior file must not break detection when the
+      // current output is valid — the capture overwrites it with valid JSON.
+      mkdirSync(join(dir, ".stride"), { recursive: true });
+      writeFileSync(join(dir, CANONICAL_RESPONSE_FILE), "{corrupt");
+      const result = await runAfter(hooks, fullResponse("G227"));
+      expect(result?.status).toBe("success");
+      const captured = JSON.parse(readFileSync(join(dir, CANONICAL_RESPONSE_FILE), "utf8"));
+      expect(captured.hooks[0].env.GOAL_IDENTIFIER).toBe("G227");
+    } finally {
+      cleanup(dir);
+    }
+  });
+
+  it("does NOT fire after_goal when the output is truncated and no file is present (grace-worker path)", async () => {
+    const dir = await initRepo();
+    try {
+      const hooks = await instantiate(dir);
+      writeAfterGoalSection(dir);
+      // No canonical file and a truncated output → nothing to detect. The
+      // server's grace-window worker promotes the goal instead.
+      const truncated = fullResponse("G227").slice(0, 40);
+      const result = await runAfter(hooks, truncated);
+      expect(result).toBeUndefined();
+      // And a truncated output must not have written a garbage file.
+      expect(existsSync(join(dir, CANONICAL_RESPONSE_FILE))).toBe(false);
     } finally {
       cleanup(dir);
     }

@@ -16,6 +16,8 @@ import {
   writeEnvCache,
   readEnvCache,
   clearEnvCache,
+  writeCanonicalResponse,
+  readCanonicalResponse,
 } from "./capture";
 
 // Re-export parser functions for backwards compatibility
@@ -33,12 +35,17 @@ export {
   writeEnvCache,
   readEnvCache,
   clearEnvCache,
+  writeCanonicalResponse,
+  readCanonicalResponse,
+  getAfterGoalStatus,
   ENV_CACHE_FILE,
+  CANONICAL_RESPONSE_FILE,
   AUTH_FILE,
   TRUNC_MARKER,
   BIN_PLACEHOLDER,
   MAX_LINES,
   type ChangedFile,
+  type AfterGoalStatus,
 } from "./capture";
 export {
   executeHookCommands,
@@ -217,6 +224,60 @@ export function peelPayloadRoot(
   } catch {
     return null;
   }
+}
+
+// --- Canonical response file: capture + file-first resolution (W1637) ---
+
+/**
+ * (W1637) Best-effort capture of the current `tool.execute.after` response to
+ * the canonical file (`${projectDir}/.stride/.last-api-response.json`), the
+ * read side of stride D118/W1609 ported to opencode. Writes ONLY when
+ * `coerceOutputText(output)` is complete valid JSON — a truncated or empty
+ * output parses as invalid and is skipped, so it never overwrites a good
+ * prior-call file, while a valid current output DOES overwrite a stale one
+ * (mirrors the bash hook's `capture_canonical_response`). Never throws.
+ */
+async function captureCanonicalResponse(
+  projectDir: string,
+  output: unknown,
+): Promise<void> {
+  const text = coerceOutputText(output);
+  if (!text) return;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    // Incomplete/invalid JSON (e.g. a harness-truncated response) — leave any
+    // prior valid capture in place rather than clobbering it with garbage.
+    return;
+  }
+  await writeCanonicalResponse(projectDir, parsed);
+}
+
+/**
+ * (W1637) Resolve the single JSON-text view of the response, preferring the
+ * canonical file over the harness-truncatable `output`. The agent's API curl
+ * tees the FULL response to the canonical file, so when opencode hands the
+ * plugin a truncated `output`, the file still carries the complete payload
+ * (including any `after_goal` entry and its GOAL_* env). Falls back to
+ * `coerceOutputText(output)` when the file is absent, unreadable, or invalid —
+ * so detection and env extraction keep working exactly as before when no file
+ * is present. Call AFTER {@link captureCanonicalResponse} so a valid current
+ * output has already refreshed the file.
+ */
+async function preferCanonicalResponseText(
+  projectDir: string,
+  output: unknown,
+): Promise<string> {
+  const fromFile = await readCanonicalResponse(projectDir);
+  if (fromFile != null) {
+    try {
+      return JSON.stringify(fromFile);
+    } catch {
+      // A value that cannot be re-serialized — fall back to the tool output.
+    }
+  }
+  return coerceOutputText(output);
 }
 
 // --- After-goal detection ---
@@ -580,10 +641,17 @@ export const StridePlugin: Plugin = async (input) => {
       const hookName = detectHook("after", command);
       if (!hookName) return;
 
-      // (W1497) One JSON-text view of the response for every consumer below —
-      // the claim-time derivation, the per-hook server env extraction, and
-      // the after_goal env.
-      const responseText = coerceOutputText(output);
+      // (W1637) Persist the current response to the canonical file when it is
+      // complete valid JSON — a valid current output overwrites a stale
+      // prior-call file; a truncated one leaves the good file intact.
+      await captureCanonicalResponse(projectDir, output);
+
+      // (W1497/W1637) One JSON-text view of the response for every consumer
+      // below — the claim-time derivation, the per-hook server env extraction,
+      // and the after_goal detection + env. Prefers the canonical file (which
+      // the API curl tee'd in full) over the harness-truncatable `output`,
+      // falling back to the raw output when no file is present.
+      const responseText = await preferCanonicalResponseText(projectDir, output);
 
       // Cache environment variables from claim response
       if (hookName === "before_doing" && output) {
@@ -693,7 +761,11 @@ export const StridePlugin: Plugin = async (input) => {
       if (
         primarySucceeded &&
         (hookName === "before_review" || hookName === "after_review") &&
-        responseHasAfterGoal(output)
+        // (W1637) Detect against the file-first `responseText`, not the raw
+        // `output`: a truncated output can drop the after_goal entry that the
+        // canonical file still carries. coerceOutputText passes the string
+        // through unchanged, so peeling behaves identically.
+        responseHasAfterGoal(responseText)
       ) {
         const agCommands = parseStrideMd(strideMd, "after_goal");
         if (agCommands.length > 0) {
