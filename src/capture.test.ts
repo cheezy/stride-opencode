@@ -15,6 +15,10 @@ import {
   writeEnvCache,
   readEnvCache,
   clearEnvCache,
+  getAfterGoalStatus,
+  writeCanonicalResponse,
+  readCanonicalResponse,
+  CANONICAL_RESPONSE_FILE,
   PUT_TIMEOUT_MS,
   TRUNC_MARKER,
   BIN_PLACEHOLDER,
@@ -756,5 +760,180 @@ describe("resolveStrideApiUrl / resolveStrideApiToken (D54)", () => {
     }
     expect(sink.join("\n")).not.toContain(PROD_TOKEN);
     expect(sink.join("\n")).not.toContain(LOCAL_TOKEN);
+  });
+});
+
+describe("getAfterGoalStatus (W1636)", () => {
+  const originalFetch = globalThis.fetch;
+  let captured: { url: string; init: RequestInit } | null = null;
+
+  beforeEach(() => {
+    captured = null;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (globalThis as any).fetch = async (url: string, init: RequestInit) => {
+      captured = { url, init };
+      return new Response(
+        JSON.stringify({
+          after_goal_armed: true,
+          goal_id: "4969",
+          env: { GOAL_ID: "4969", GOAL_IDENTIFIER: "G227" },
+        }),
+        { status: 200 },
+      );
+    };
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  it("GETs after_goal_status and parses {armed, goalId, env}", async () => {
+    const result = await getAfterGoalStatus(
+      "https://stride.example.com",
+      "test_token_abc123",
+      "42",
+    );
+    expect(captured).not.toBeNull();
+    expect(captured!.url).toBe(
+      "https://stride.example.com/api/tasks/42/after_goal_status",
+    );
+    expect(captured!.init.method).toBe("GET");
+    const headers = captured!.init.headers as Record<string, string>;
+    expect(headers.Authorization).toBe("Bearer test_token_abc123");
+    expect(result).toEqual({
+      armed: true,
+      goalId: "4969",
+      env: { GOAL_ID: "4969", GOAL_IDENTIFIER: "G227" },
+    });
+  });
+
+  it("coerces a numeric goal_id to a string and defaults a missing env to {}", async () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (globalThis as any).fetch = async () =>
+      new Response(JSON.stringify({ after_goal_armed: false, goal_id: 4969 }), {
+        status: 200,
+      });
+    const result = await getAfterGoalStatus("https://stride.example.com", "tok", "42");
+    expect(result).toEqual({ armed: false, goalId: "4969", env: {} });
+  });
+
+  it("reports armed=false and goalId=null when the server omits them", async () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (globalThis as any).fetch = async () =>
+      new Response(JSON.stringify({ env: { A: "1", B: 2 } }), { status: 200 });
+    const result = await getAfterGoalStatus("https://stride.example.com", "tok", "42");
+    // armed defaults false, goalId null, and non-string env values are dropped.
+    expect(result).toEqual({ armed: false, goalId: null, env: { A: "1" } });
+  });
+
+  it("strips a trailing slash from apiBase", async () => {
+    await getAfterGoalStatus("https://stride.example.com/", "tok", "42");
+    expect(captured!.url).toBe(
+      "https://stride.example.com/api/tasks/42/after_goal_status",
+    );
+  });
+
+  it("no-ops (null) when apiBase, token, or taskId is missing", async () => {
+    expect(await getAfterGoalStatus(null, "tok", "42")).toBeNull();
+    expect(await getAfterGoalStatus("https://stride.example.com", null, "42")).toBeNull();
+    expect(await getAfterGoalStatus("https://stride.example.com", "tok", null)).toBeNull();
+    expect(
+      await getAfterGoalStatus("https://stride.example.com", "tok", undefined),
+    ).toBeNull();
+    // None of the prereq-miss paths touch the network.
+    expect(captured).toBeNull();
+  });
+
+  it("no-ops (null) on a non-2xx response", async () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (globalThis as any).fetch = async () => new Response("nope", { status: 503 });
+    expect(await getAfterGoalStatus("https://stride.example.com", "tok", "42")).toBeNull();
+  });
+
+  it("no-ops (null) on a transport error without throwing", async () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (globalThis as any).fetch = async () => {
+      throw new Error("ECONNREFUSED");
+    };
+    expect(await getAfterGoalStatus("https://stride.example.com", "tok", "42")).toBeNull();
+  });
+
+  it("no-ops (null) on a non-object JSON body", async () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (globalThis as any).fetch = async () =>
+      new Response(JSON.stringify(["not", "an", "object"]), { status: 200 });
+    expect(await getAfterGoalStatus("https://stride.example.com", "tok", "42")).toBeNull();
+  });
+
+  it("no-ops (null) and never throws on an invalid-JSON body", async () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (globalThis as any).fetch = async () => new Response("{not json", { status: 200 });
+    expect(await getAfterGoalStatus("https://stride.example.com", "tok", "42")).toBeNull();
+  });
+
+  it("never leaks the token to stderr on failure", async () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (globalThis as any).fetch = async () => {
+      throw new Error("ECONNREFUSED");
+    };
+    const sink: string[] = [];
+    const originalError = console.error;
+    console.error = (...args: unknown[]) => void sink.push(args.join(" "));
+    try {
+      await getAfterGoalStatus("https://stride.example.com", "stride_dev_secret", "42");
+    } finally {
+      console.error = originalError;
+    }
+    expect(sink.join(" ")).not.toContain("stride_dev_secret");
+  });
+});
+
+describe("writeCanonicalResponse / readCanonicalResponse (W1636)", () => {
+  it("round-trips an arbitrary JSON payload through the nested .stride/ path", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "stride-canonical-"));
+    try {
+      const payload = { data: { identifier: "W1636", hooks: [{ name: "after_goal" }] } };
+      await writeCanonicalResponse(dir, payload);
+      // Bun.write auto-creates the missing .stride/ parent directory.
+      expect(existsSync(join(dir, CANONICAL_RESPONSE_FILE))).toBe(true);
+      expect(await readCanonicalResponse(dir)).toEqual(payload);
+    } finally {
+      cleanup(dir);
+    }
+  });
+
+  it("returns null when the response file is absent", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "stride-canonical-"));
+    try {
+      expect(await readCanonicalResponse(dir)).toBeNull();
+    } finally {
+      cleanup(dir);
+    }
+  });
+
+  it("degrades an invalid-JSON file to null without throwing", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "stride-canonical-"));
+    try {
+      mkdirSync(join(dir, ".stride"), { recursive: true });
+      writeFileSync(join(dir, CANONICAL_RESPONSE_FILE), "{not json");
+      expect(await readCanonicalResponse(dir)).toBeNull();
+    } finally {
+      cleanup(dir);
+    }
+  });
+
+  it("the canonical path is excluded from a task's changed_files", async () => {
+    const { dir, base } = await initRepo();
+    try {
+      // Two working-tree changes: a real edit and the canonical capture.
+      writeFileSync(join(dir, "a.txt"), "v2\n");
+      await writeCanonicalResponse(dir, { data: { identifier: "W1636" } });
+      const files = await captureChangedFiles($ as never, dir, base);
+      const paths = files.map((f) => f.path);
+      expect(paths).toContain("a.txt");
+      expect(paths).not.toContain(CANONICAL_RESPONSE_FILE);
+    } finally {
+      cleanup(dir);
+    }
   });
 });

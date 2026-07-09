@@ -65,6 +65,27 @@ export const MAX_LINES = 500;
 export const ENV_CACHE_FILE = ".stride-env-cache";
 
 /**
+ * (W1636) Relative path of the canonical API-response capture, mirroring the
+ * bash hook's `RESPONSE_FILE="$PROJECT_DIR/.stride/.last-api-response.json"`.
+ * The full untruncated /complete (or /claim) response is written here so the
+ * after_goal detection reads it in preference to the harness-truncatable tool
+ * stdout. Repo-root-relative, so it is excluded from `changed_files` by an
+ * exact-equality match in `ROOT_ARTIFACTS`.
+ */
+export const CANONICAL_RESPONSE_FILE = ".stride/.last-api-response.json";
+
+/**
+ * (W1636) Typed result of {@link getAfterGoalStatus}: whether the just-completed
+ * task armed an after_goal hook (`armed`), the parent goal id to PATCH
+ * (`goalId`, `null` when the server omits it), and the hook's env map (`env`).
+ */
+export interface AfterGoalStatus {
+  armed: boolean;
+  goalId: string | null;
+  env: Record<string, string>;
+}
+
+/**
  * Capture the per-file diff snapshot.
  *
  * @param $ - Bun shell helper (from the plugin's `Plugin` context)
@@ -108,6 +129,12 @@ export async function captureChangedFiles(
     ".stride-diff-upload-state",
     ".stride-changed-files.json",
     ENV_CACHE_FILE,
+    // (W1636) The canonical API-response capture is hook bookkeeping, never
+    // task output. This is an exact-match exclusion (git emits repo-root-
+    // relative paths), so it removes precisely `.stride/.last-api-response.json`
+    // — narrower than the bash hook's whole-`.stride/`-directory prefix exclude;
+    // a future sibling file under `.stride/` would need its own entry here.
+    CANONICAL_RESPONSE_FILE,
   ]);
 
   // Dedupe by path (tracked and untracked should not overlap, but the Set
@@ -410,6 +437,67 @@ export async function putChangedFiles(
 }
 
 /**
+ * (W1636) GET `/api/tasks/:id/after_goal_status`, the transport twin of the
+ * bash hook's `detect_after_goal_via_api`. Returns the parsed
+ * {@link AfterGoalStatus} on a 2xx JSON response, or `null` for every degraded
+ * path — missing credentials/task id, non-2xx, non-object body, transport
+ * error, or the {@link PUT_TIMEOUT_MS} abort. Best-effort by contract: it never
+ * throws, so a caller can treat a `null`/`armed: false` result as "no after_goal
+ * to run" without gating. Mirrors {@link putChangedFiles}'s fail-soft handling
+ * and abort timeout; unlike a mutating PUT, a failed detection is silent (no
+ * stderr warning) because a missing after_goal is the common, non-noteworthy
+ * case. Takes already-resolved `apiBase`/`token` (via resolveStrideApiUrl/Token)
+ * — it never reads credentials or an env var itself.
+ */
+export async function getAfterGoalStatus(
+  apiBase: string | null,
+  token: string | null,
+  taskId: string | null | undefined,
+): Promise<AfterGoalStatus | null> {
+  if (!apiBase || !token || !taskId) return null;
+  const url = `${apiBase.replace(/\/+$/, "")}/api/tasks/${taskId}/after_goal_status`;
+
+  try {
+    const resp = await fetch(url, {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+      // Same abort budget as putChangedFiles — a hung server must not stall the
+      // caller; an abort takes the transport-failure path (return null) below.
+      signal: AbortSignal.timeout(PUT_TIMEOUT_MS),
+    });
+    if (!resp.ok) return null;
+
+    const parsed: unknown = await resp.json();
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return null;
+    }
+    const obj = parsed as Record<string, unknown>;
+
+    const goalId =
+      typeof obj.goal_id === "string"
+        ? obj.goal_id
+        : typeof obj.goal_id === "number"
+          ? String(obj.goal_id)
+          : null;
+
+    const env: Record<string, string> = {};
+    const rawEnv = obj.env;
+    if (rawEnv && typeof rawEnv === "object" && !Array.isArray(rawEnv)) {
+      for (const [key, value] of Object.entries(rawEnv)) {
+        if (typeof value === "string") env[key] = value;
+      }
+    }
+
+    return { armed: obj.after_goal_armed === true, goalId, env };
+  } catch {
+    // best-effort detection — a failed GET simply means "no after_goal known"
+    return null;
+  }
+}
+
+/**
  * (W1094) Record the outcome of a changed_files PUT attempt so the
  * before_review self-heal can verify it on a fresh budget. Writes ONLY the
  * task id and HTTP code — never the URL or bearer token — to
@@ -515,5 +603,49 @@ export async function clearEnvCache(projectDir: string): Promise<void> {
     await Bun.file(`${projectDir}/${ENV_CACHE_FILE}`).unlink();
   } catch {
     // File didn't exist — that's the expected path
+  }
+}
+
+/**
+ * (W1636) Persist the full API response to
+ * `${projectDir}/.stride/.last-api-response.json` (see
+ * {@link CANONICAL_RESPONSE_FILE}), the twin of the bash hook's
+ * `capture_canonical_response`. The harness truncates the tool stdout the hook
+ * would otherwise parse, so after_goal detection reads this untruncated file
+ * first. `Bun.write` creates the missing `.stride/` parent directory. Accepts an
+ * arbitrary JSON-serializable payload; best-effort — a failed write never blocks
+ * the caller.
+ */
+export async function writeCanonicalResponse(
+  projectDir: string,
+  response: unknown,
+): Promise<void> {
+  try {
+    await Bun.write(
+      `${projectDir}/${CANONICAL_RESPONSE_FILE}`,
+      JSON.stringify(response) + "\n",
+    );
+  } catch {
+    // best-effort — never block on a failed capture write
+  }
+}
+
+/**
+ * (W1636) Read the canonical API-response capture, or `null` when the file is
+ * absent, unreadable, or not valid JSON — mirroring the bash hook's
+ * `read_canonical_response` validate-before-trust rule so a truncated or
+ * garbage file degrades to "nothing captured" rather than throwing. Returns the
+ * parsed payload verbatim (any JSON value), so the caller inspects the shape it
+ * expects.
+ */
+export async function readCanonicalResponse(
+  projectDir: string,
+): Promise<unknown | null> {
+  try {
+    const file = Bun.file(`${projectDir}/${CANONICAL_RESPONSE_FILE}`);
+    if (!(await file.exists())) return null;
+    return JSON.parse(await file.text());
+  } catch {
+    return null;
   }
 }
