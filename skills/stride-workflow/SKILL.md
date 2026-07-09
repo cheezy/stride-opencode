@@ -617,6 +617,12 @@ Call `PATCH /api/tasks/:id/complete` with ALL required fields:
 
 When the just-completed task is the **final child of a parent goal**, the server bundles a fifth `after_goal` entry in the response of `/complete` (when `needs_review=false`) or `/mark_reviewed` (when `needs_review=true`), alongside the primary hooks. The plugin's `tool.execute.after` handler auto-detects this entry and executes the local `## after_goal` section as a blocking hook (same shape as `after_doing` / `before_review`).
 
+**How the plugin detects `after_goal` reliably (W1637/W1638).** The `/complete` (and `/mark_reviewed`) response can be large — the echoed `reviewer_result` alone runs to tens of KB — and a host may truncate the `tool.execute.after` `output` the plugin would otherwise parse. Detection therefore does **not** depend on that output being intact. In `tool.execute.after` the plugin:
+
+1. **Captures** the current response to the canonical file `${projectDir}/.stride/.last-api-response.json` whenever the output is complete valid JSON — a valid response overwrites any stale prior capture, and a truncated one leaves a good file intact. This canonical file is the **untruncated source of truth**; it is hook bookkeeping and is excluded from a task's `changed_files`.
+2. **Prefers the canonical file** over the truncatable output when detecting the `after_goal` entry and extracting its `GOAL_*` env, falling back to the output only when no file is present.
+3. As the **reliability guarantee**, when neither the file nor the output yields an `after_goal`, issues a fresh, hook-initiated `GET /api/tasks/:id/after_goal_status` — keyed off the claim-cached `TASK_ID` — which detects an armed `after_goal` independent of the response payload entirely, and runs the `## after_goal` section from that fresh result. It is de-duplicated against the file/output fast path (`## after_goal` runs at most once) and best-effort: a missing `TASK_ID`, an unreachable endpoint, or a not-armed result is a silent no-op.
+
 The hook captures `{exit_code, output, duration_ms}` and emits the structured result on stdout. To flip the parent goal to Done, the agent must then POST that result:
 
 ```bash
@@ -627,6 +633,14 @@ curl -X PATCH "$STRIDE_API_URL/api/tasks/$GOAL_ID/after_goal" \
 ```
 
 `$GOAL_ID` is supplied in the hook's `GOAL_ID` / `GOAL_IDENTIFIER` env vars (see Step 7's env-var matrix). A `2xx` with `exit_code == 0` transitions the goal to Done. A `2xx` with `exit_code != 0` records the failure on the goal's `after_goal_attempts` audit log and leaves the goal In Progress for the user to investigate.
+
+**Verify the push landed (last-child completions).** The `## after_goal` section is what performs any project push (e.g. `git push`); the server-side grace-window worker only flips the goal to Done — it does **not** push. So after a completion that finishes a goal's last child, confirm the push actually happened:
+
+```bash
+git log origin/main..main --oneline
+```
+
+An empty result means local `main` is level with the remote — the push landed. If it lists commits, the `## after_goal` section did not run (e.g. a truncated response with no canonical capture and an unreachable status endpoint) — run the `## after_goal` steps from `.stride.md` manually (push, then POST the after_goal result as above) so the goal's work reaches the remote.
 
 **Back-compat (for older agent runtimes):**
 

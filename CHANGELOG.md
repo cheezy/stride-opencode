@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.26.0] - 2026-07-09
+
+### Added — `after_goal` reliability port: canonical response file + fresh-GET guarantee (G4969: W1636–W1640)
+
+The plugin captures whatever `tool.execute.after` `output` the host hands it, and a large `/complete` response (the echoed `reviewer_result` alone runs to tens of KB) can be truncated before the plugin parses it — silently dropping the bundled `after_goal` entry and its `GOAL_*` env on a goal's last child. Ported the stride D118/D119/W1609/W1612 reliability work to opencode across three layers:
+
+- **Transport helpers (`src/capture.ts`, W1636):** `getAfterGoalStatus(apiBase, token, taskId)` performs a fail-soft `GET /api/tasks/:id/after_goal_status` returning a typed `{armed, goalId, env}` (`null` on any degraded path); `writeCanonicalResponse` / `readCanonicalResponse` round-trip `${projectDir}/.stride/.last-api-response.json`, which is added to the `ROOT_ARTIFACTS` exclusion so it never enters a task's `changed_files`.
+- **Read side (`src/index.ts`, W1637):** `tool.execute.after` captures the current response to the canonical file when it is complete valid JSON (a valid response overwrites a stale file; a truncated one leaves a good file intact), and resolves a **file-first** response view so `after_goal` detection and `GOAL_*` env extraction prefer the untruncated file, falling back to the intercepted output.
+- **Reliability guarantee (`src/index.ts`, W1638):** when neither the file nor the output yields an `after_goal`, a hook-initiated fresh `getAfterGoalStatus` GET — keyed off the claim-cached `TASK_ID` — detects an armed `after_goal` independent of the response payload and runs the `## after_goal` section from the fresh result. De-duplicated against the fast path (`## after_goal` runs at most once) and best-effort (missing `TASK_ID`, unreachable endpoint, or not-armed → silent no-op). The `TASK_ID` is captured before the `after_review` cleanup so the guarantee also holds on `/mark_reviewed`.
+- **Tests (W1639)** and **docs (W1640):** end-to-end coverage of the truncation-rescue and no-false-positive paths, and `skills/stride-workflow/SKILL.md` now documents the canonical file as the untruncated source, the fresh-GET guarantee, and a post-completion push-verification step (the grace-window worker flips the goal to Done but does **not** push).
+
 ## [1.25.1] - 2026-07-02
 
 ### Fixed — README and AGENTS.md accuracy drift (D97)
