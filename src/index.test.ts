@@ -2016,3 +2016,246 @@ describe("StridePlugin — W1637 canonical response file preference", () => {
     }
   });
 });
+
+// The hook-initiated fresh GET /api/tasks/:id/after_goal_status is the
+// reliability guarantee (W1638 / stride D119): because the plugin captures
+// whatever truncatable output the host hands it, the output and the canonical
+// file are both best-effort. Keyed off the claim-cached TASK_ID, the fresh GET
+// detects an armed after_goal independent of both — de-duped against the fast
+// path and best-effort if unreachable.
+describe("StridePlugin — W1638 fresh-GET after_goal reliability fallback", () => {
+  const originalFetch = globalThis.fetch;
+  let fetchUrls: string[] = [];
+  let afterGoalStatus: () => Response | never;
+
+  const COMPLETE_CMD =
+    'curl -X PATCH http://localhost/api/tasks/42/complete -H "Authorization: Bearer tok"';
+
+  async function initRepo(): Promise<string> {
+    const dir = mkdtempSync(join(tmpdir(), "stride-oc-w1638-"));
+    await $`git init -q`.cwd(dir).quiet();
+    await $`git config user.email "test@test.local"`.cwd(dir).quiet();
+    await $`git config user.name "Test"`.cwd(dir).quiet();
+    writeFileSync(
+      join(dir, ".gitignore"),
+      ".stride.md\n.stride-changed-files.json\n.stride-diff-upload-state\n.stride-env-cache\n.stride/\n",
+    );
+    writeFileSync(join(dir, "tracked.txt"), "v1\n");
+    await $`git add .gitignore tracked.txt`.cwd(dir).quiet();
+    await $`git commit -q -m v1`.cwd(dir).quiet();
+    return dir;
+  }
+  function cleanup(dir: string): void {
+    try { rmSync(dir, { recursive: true, force: true }); } catch { /* best-effort */ }
+  }
+  async function instantiate(dir: string) {
+    return (await StridePlugin({ directory: dir, worktree: dir, $ } as never)) as {
+      "tool.execute.after": (i: unknown, o?: unknown) => Promise<void>;
+    };
+  }
+  // Seed the claim env cache directly so TASK_ID is present without running a
+  // full claim (a claim would also capture its response to the canonical file,
+  // muddying the "no file" scenarios).
+  function seedTaskId(dir: string): void {
+    writeFileSync(join(dir, ".stride-env-cache"), JSON.stringify({ TASK_ID: "42" }) + "\n");
+  }
+  function writeAfterGoalSection(dir: string, body = 'echo "goal=$GOAL_IDENTIFIER"'): void {
+    writeFileSync(join(dir, ".stride.md"), `## after_goal\n\n\`\`\`bash\n${body}\n\`\`\`\n`);
+  }
+  function fullResponseWithAfterGoal(goalIdentifier: string): string {
+    return JSON.stringify({
+      data: { id: 42, status: "completed" },
+      hooks: [
+        { name: "after_goal", env: { GOAL_ID: "4969", GOAL_IDENTIFIER: goalIdentifier } },
+      ],
+    });
+  }
+  async function runAfterHook(
+    hooks: { "tool.execute.after": (i: unknown, o?: unknown) => Promise<void> },
+    command: string,
+    output: unknown,
+  ): Promise<Record<string, unknown> | undefined> {
+    const origOut = process.stdout.write.bind(process.stdout);
+    let stdoutCap = "";
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (process.stdout as any).write = (chunk: unknown) => { stdoutCap += String(chunk); return true; };
+    try {
+      await hooks["tool.execute.after"]({ input: { command } }, output);
+    } finally {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (process.stdout as any).write = origOut;
+    }
+    const line = stdoutCap.split("\n").find((l) => l.includes('"hook":"after_goal"'));
+    return line ? (JSON.parse(line) as Record<string, unknown>) : undefined;
+  }
+  async function runComplete(
+    hooks: { "tool.execute.after": (i: unknown, o?: unknown) => Promise<void> },
+    output: unknown,
+  ): Promise<Record<string, unknown> | undefined> {
+    return runAfterHook(hooks, COMPLETE_CMD, output);
+  }
+  const calledStatus = () => fetchUrls.some((u) => u.includes("/after_goal_status"));
+
+  beforeEach(() => {
+    fetchUrls = [];
+    // Default: the server reports an armed after_goal with GOAL_* env.
+    afterGoalStatus = () =>
+      new Response(
+        JSON.stringify({
+          after_goal_armed: true,
+          goal_id: "4969",
+          env: { GOAL_ID: "4969", GOAL_IDENTIFIER: "G227" },
+        }),
+        { status: 200 },
+      );
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (globalThis as any).fetch = async (url: string) => {
+      const u = String(url);
+      fetchUrls.push(u);
+      if (u.includes("/after_goal_status")) return afterGoalStatus();
+      // Any other call (the before_review self-heal changed_files PUT) succeeds.
+      return new Response("", { status: 200 });
+    };
+  });
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  it("fires after_goal via the fresh GET under a fully truncated output with no file", async () => {
+    const dir = await initRepo();
+    try {
+      seedTaskId(dir);
+      const hooks = await instantiate(dir);
+      writeAfterGoalSection(dir);
+      // No canonical file, and a truncated (invalid-JSON) output — the fast
+      // path can detect nothing, so only the fresh GET can arm after_goal.
+      const truncated = fullResponseWithAfterGoal("G227").slice(0, 40);
+      const result = await runComplete(hooks, truncated);
+      expect(calledStatus()).toBe(true);
+      expect(result?.status).toBe("success");
+      const commandsOutput = result!.commands_output as { stdout: string }[];
+      expect(commandsOutput[0].stdout).toBe("goal=G227\n");
+      // The truncated output must not have written a canonical file.
+      expect(existsSync(join(dir, CANONICAL_RESPONSE_FILE))).toBe(false);
+    } finally {
+      cleanup(dir);
+    }
+  });
+
+  it("does not run after_goal when the fresh GET reports armed=false", async () => {
+    const dir = await initRepo();
+    try {
+      seedTaskId(dir);
+      afterGoalStatus = () =>
+        new Response(JSON.stringify({ after_goal_armed: false }), { status: 200 });
+      const hooks = await instantiate(dir);
+      writeAfterGoalSection(dir);
+      const result = await runComplete(hooks, fullResponseWithAfterGoal("G227").slice(0, 40));
+      expect(calledStatus()).toBe(true);
+      expect(result).toBeUndefined();
+    } finally {
+      cleanup(dir);
+    }
+  });
+
+  it("de-dups: when the fast path fires, the fresh GET is NOT called", async () => {
+    const dir = await initRepo();
+    try {
+      seedTaskId(dir);
+      const hooks = await instantiate(dir);
+      writeAfterGoalSection(dir);
+      // A complete, valid output carrying after_goal — the fast path handles it.
+      // The distinct identifier proves the env came from the output, not the GET
+      // (which would return G227).
+      const result = await runComplete(hooks, fullResponseWithAfterGoal("G_FAST"));
+      const commandsOutput = result!.commands_output as { stdout: string }[];
+      expect(commandsOutput[0].stdout).toBe("goal=G_FAST\n");
+      // The reliability GET must never fire when the fast path already ran.
+      expect(calledStatus()).toBe(false);
+    } finally {
+      cleanup(dir);
+    }
+  });
+
+  it("is a silent no-op when the after_goal_status endpoint is unreachable", async () => {
+    const dir = await initRepo();
+    try {
+      seedTaskId(dir);
+      afterGoalStatus = () => {
+        throw new Error("ECONNREFUSED");
+      };
+      const hooks = await instantiate(dir);
+      writeAfterGoalSection(dir);
+      // No throw, and after_goal simply does not run.
+      const result = await runComplete(hooks, fullResponseWithAfterGoal("G227").slice(0, 40));
+      expect(calledStatus()).toBe(true);
+      expect(result).toBeUndefined();
+    } finally {
+      cleanup(dir);
+    }
+  });
+
+  it("falls back to the result goalId for GOAL_ID when the env omits it", async () => {
+    const dir = await initRepo();
+    try {
+      seedTaskId(dir);
+      // Armed, with goal_id set but GOAL_ID absent from the hook env.
+      afterGoalStatus = () =>
+        new Response(
+          JSON.stringify({
+            after_goal_armed: true,
+            goal_id: "4969",
+            env: { GOAL_IDENTIFIER: "G227" },
+          }),
+          { status: 200 },
+        );
+      const hooks = await instantiate(dir);
+      writeAfterGoalSection(dir, 'echo "gid=$GOAL_ID"');
+      const result = await runComplete(hooks, fullResponseWithAfterGoal("G227").slice(0, 40));
+      const commandsOutput = result!.commands_output as { stdout: string }[];
+      expect(commandsOutput[0].stdout).toBe("gid=4969\n");
+    } finally {
+      cleanup(dir);
+    }
+  });
+
+  it("does not run the fresh GET when TASK_ID was never cached", async () => {
+    const dir = await initRepo();
+    try {
+      // No seedTaskId → envCache has no TASK_ID → the fallback short-circuits.
+      const hooks = await instantiate(dir);
+      writeAfterGoalSection(dir);
+      const result = await runComplete(hooks, fullResponseWithAfterGoal("G227").slice(0, 40));
+      expect(calledStatus()).toBe(false);
+      expect(result).toBeUndefined();
+    } finally {
+      cleanup(dir);
+    }
+  });
+
+  it("still fires on a truncated /mark_reviewed even though after_review clears the cache", async () => {
+    const dir = await initRepo();
+    try {
+      // TASK_ID is captured BEFORE the after_review cleanup wipes envCache
+      // (memory + disk), so the fresh GET survives on the /mark_reviewed path.
+      seedTaskId(dir);
+      const hooks = await instantiate(dir);
+      writeAfterGoalSection(dir);
+      const MARK_REVIEWED_CMD =
+        'curl -X PATCH http://localhost/api/tasks/42/mark_reviewed -H "Authorization: Bearer tok"';
+      const result = await runAfterHook(
+        hooks,
+        MARK_REVIEWED_CMD,
+        fullResponseWithAfterGoal("G227").slice(0, 40),
+      );
+      expect(calledStatus()).toBe(true);
+      expect(result?.status).toBe("success");
+      const commandsOutput = result!.commands_output as { stdout: string }[];
+      expect(commandsOutput[0].stdout).toBe("goal=G227\n");
+      // And the after_review cleanup still removed the persisted cache.
+      expect(existsSync(join(dir, ".stride-env-cache"))).toBe(false);
+    } finally {
+      cleanup(dir);
+    }
+  });
+});

@@ -18,6 +18,7 @@ import {
   clearEnvCache,
   writeCanonicalResponse,
   readCanonicalResponse,
+  getAfterGoalStatus,
 } from "./capture";
 
 // Re-export parser functions for backwards compatibility
@@ -562,6 +563,23 @@ export const StridePlugin: Plugin = async (input) => {
     });
   }
 
+  // (W793/W1638) Run the local `## after_goal` section with the given hook env
+  // and emit its structured HookResult to stdout for the agent to forward via
+  // PATCH /api/tasks/:goal_id/after_goal. An empty or absent section is a
+  // silent no-op (back-compat — the server's grace-window worker promotes the
+  // goal). Shared by the fast path (file/output detection) and the W1638
+  // fresh-GET reliability fallback, so `## after_goal` runs at most once per
+  // completion regardless of which detector fired.
+  async function runAfterGoalSection(
+    strideMd: string,
+    extraEnv: EnvCache,
+  ): Promise<void> {
+    const agCommands = parseStrideMd(strideMd, "after_goal");
+    if (agCommands.length === 0) return;
+    const agResult = await executeCommands("after_goal", agCommands, extraEnv);
+    process.stdout.write(formatHookResultJson(agResult) + "\n");
+  }
+
   return {
     "tool.execute.before": async (input, output) => {
       // --- Skill-activation gate ---
@@ -735,6 +753,20 @@ export const StridePlugin: Plugin = async (input) => {
       // empty no-op — matches the original behavior at the pre-W793 early
       // return for that branch).
 
+      // (W1638) The after_goal reliability fallback below is keyed off the
+      // claim-cached TASK_ID. Resolve it HERE, before the after_review cleanup
+      // wipes envCache (memory + disk) — otherwise a truncated last-child
+      // /mark_reviewed would clear TASK_ID out from under the fallback and the
+      // guarantee could never fire on the after_review path.
+      const afterGoalEligible =
+        primarySucceeded &&
+        (hookName === "before_review" || hookName === "after_review");
+      let afterGoalTaskId: string | undefined;
+      if (afterGoalEligible) {
+        await loadEnvCacheIfEmpty();
+        afterGoalTaskId = envCache.TASK_ID;
+      }
+
       // Clean up env cache and snapshot after the final hook in the lifecycle.
       // Runs regardless of primary success/failure (matches pre-W793 behavior
       // where the cleanup at lines 348-352 fired before the failure-logging
@@ -751,36 +783,57 @@ export const StridePlugin: Plugin = async (input) => {
       }
 
       // --- After-goal routing (W793 / mirrors stride v1.17.1 W504) ---
-      // When the server bundles an `after_goal` entry in the response of
-      // /complete or /mark_reviewed (last-child-of-goal case), run the local
-      // `## after_goal` section as a blocking hook. Missing `## after_goal`
-      // in .stride.md is a clean no-op (back-compat). Structured success or
-      // failure JSON is written to stdout for the agent to forward via
-      // PATCH /api/tasks/:goal_id/after_goal. We do NOT throw — the primary
-      // curl has already returned, so blocking would have no effect.
-      if (
-        primarySucceeded &&
-        (hookName === "before_review" || hookName === "after_review") &&
-        // (W1637) Detect against the file-first `responseText`, not the raw
-        // `output`: a truncated output can drop the after_goal entry that the
-        // canonical file still carries. coerceOutputText passes the string
-        // through unchanged, so peeling behaves identically.
-        responseHasAfterGoal(responseText)
-      ) {
-        const agCommands = parseStrideMd(strideMd, "after_goal");
-        if (agCommands.length > 0) {
-          // (W1497) GOAL_* rides the after_goal entry env, delivered here and
-          // only here — never merged into envCache, never visible to primary
-          // commands.
-          const agResult = await executeCommands(
-            "after_goal",
-            agCommands,
-            extractHookEnvFromResponse(responseText, "after_goal"),
-          );
-          process.stdout.write(formatHookResultJson(agResult) + "\n");
+      // When /complete or /mark_reviewed finishes a goal's last child, run the
+      // local `## after_goal` section as a blocking hook and write its
+      // structured result to stdout for the agent to forward via
+      // PATCH /api/tasks/:goal_id/after_goal. We do NOT throw — the primary curl
+      // has already returned, so blocking would have no effect. Two independent
+      // detectors feed one execution (`## after_goal` runs at most once).
+      // `afterGoalEligible` and `afterGoalTaskId` were resolved above, before the
+      // after_review cleanup, so the fallback survives on the /mark_reviewed path.
+
+      // Fast path (W793/W1637): the after_goal entry present in the file-first
+      // response — zero extra network cost. Detect against `responseText`, not
+      // the raw `output` (a truncated output can drop the entry the canonical
+      // file still carries; coerceOutputText passes the string through so
+      // peeling behaves identically). GOAL_* rides the entry env, delivered
+      // here and only here — never merged into envCache.
+      let afterGoalHandled = false;
+      if (afterGoalEligible && responseHasAfterGoal(responseText)) {
+        await runAfterGoalSection(
+          strideMd,
+          extractHookEnvFromResponse(responseText, "after_goal"),
+        );
+        afterGoalHandled = true;
+      }
+
+      // Reliability fallback (W1638 / mirrors stride D119 commit 9e2ad49): the
+      // plugin captures whatever (truncatable) output the host hands it, so both
+      // the output and the canonical-file capture are best-effort. A
+      // hook-initiated fresh GET /api/tasks/:id/after_goal_status — keyed off the
+      // claim-cached TASK_ID, credentials resolved like every other API call —
+      // is the real guarantee: it detects an armed after_goal independent of the
+      // intercepted output or the file. Runs only when the fast path found
+      // nothing (de-duped — never both), and is best-effort: a missing TASK_ID,
+      // an unreachable endpoint, or a not-armed result is a silent no-op (the
+      // server's grace-window worker still promotes the goal).
+      if (afterGoalEligible && !afterGoalHandled) {
+        // TASK_ID captured before the after_review cleanup (see above) so this
+        // survives on both /complete and /mark_reviewed.
+        const taskId = afterGoalTaskId;
+        if (taskId) {
+          const apiBase = await resolveStrideApiUrl(projectDir, command);
+          const token = await resolveStrideApiToken(projectDir, command);
+          const status = await getAfterGoalStatus(apiBase, token, taskId);
+          if (status?.armed) {
+            // GOAL_* rides the fresh result's env. GOAL_ID falls back to the
+            // result's goalId when the server omits it from the hook env
+            // (mirrors the bash hook's parent_id fallback).
+            const agEnv: EnvCache = { ...status.env };
+            if (!agEnv.GOAL_ID && status.goalId) agEnv.GOAL_ID = status.goalId;
+            await runAfterGoalSection(strideMd, agEnv);
+          }
         }
-        // agCommands.length === 0 → silent no-op (back-compat); the server's
-        // grace-window worker promotes the goal after the configured wait.
       }
     },
   };
