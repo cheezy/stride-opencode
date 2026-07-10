@@ -7,6 +7,7 @@ import {
   parseStrideMd,
   filterCommands,
   detectHook,
+  taskIdFromCommand,
   extractCommand,
   extractToolName,
   extractToolArgs,
@@ -243,6 +244,48 @@ describe("detectHook", () => {
         "curl https://stride.dev/api/tasks/99/mark_reviewed",
       ),
     ).toBeNull();
+  });
+});
+
+// --- URL -> task id extraction (D127) ---
+
+describe("taskIdFromCommand", () => {
+  it("extracts the numeric id from a /complete command URL", () => {
+    expect(
+      taskIdFromCommand(
+        "curl -X PATCH https://stride.dev/api/tasks/123/complete -d '{}'",
+      ),
+    ).toBe("123");
+  });
+
+  it("extracts the numeric id from a /mark_reviewed command URL", () => {
+    expect(
+      taskIdFromCommand(
+        "curl -X PATCH https://stride.dev/api/tasks/456/mark_reviewed",
+      ),
+    ).toBe("456");
+  });
+
+  it("returns null for the claim path (no id in the URL)", () => {
+    expect(
+      taskIdFromCommand("curl -X POST https://stride.dev/api/tasks/claim"),
+    ).toBeNull();
+  });
+
+  it("returns null for the next path (no id in the URL)", () => {
+    expect(
+      taskIdFromCommand("curl https://stride.dev/api/tasks/next"),
+    ).toBeNull();
+  });
+
+  it("returns null for a non-numeric id segment", () => {
+    expect(
+      taskIdFromCommand("curl -X PATCH https://stride.dev/api/tasks/abc/complete"),
+    ).toBeNull();
+  });
+
+  it("returns null for a non-Stride command", () => {
+    expect(taskIdFromCommand("git status")).toBeNull();
   });
 });
 
@@ -702,6 +745,50 @@ describe("StridePlugin — W1093 early capture + W1094 self-heal", () => {
       writeFileSync(join(dir, ".stride-diff-upload-state"), "task_id=41\nhttp_code=200\n");
       await hooks["tool.execute.after"]({ input: { command: CLAIM_CMD } }, CLAIM_RESPONSE);
       expect(existsSync(join(dir, ".stride-diff-upload-state"))).toBe(false);
+    } finally {
+      cleanup(dir);
+    }
+  });
+
+  // A claim response carrying a STALE task id (41) — e.g. a corrupted or piped
+  // claim capture from a prior task — while the /complete command carries the
+  // authoritative id (42) in its URL.
+  const STALE_CLAIM_RESPONSE = JSON.stringify({
+    data: { id: 41, identifier: "W41", title: "T", status: "in_progress" },
+  });
+
+  it("D127: after_doing finalize PUT targets the /complete URL id, not a stale env TASK_ID", async () => {
+    const dir = await initRepo();
+    try {
+      const hooks = await instantiate(dir);
+      await hooks["tool.execute.after"]({ input: { command: CLAIM_CMD } }, STALE_CLAIM_RESPONSE);
+      putCalls = [];
+      writeFileSync(join(dir, ".stride.md"), "## after_doing\n\n```bash\n```\n");
+      await hooks["tool.execute.before"]({ input: { command: COMPLETE_CMD } });
+      expect(putCalls.length).toBe(1);
+      expect(putCalls[0]).toContain("/api/tasks/42/changed_files");
+      expect(putCalls[0]).not.toContain("/api/tasks/41/");
+      const state = readFileSync(join(dir, ".stride-diff-upload-state"), "utf8");
+      expect(state).toBe("task_id=42\nhttp_code=200\n");
+    } finally {
+      cleanup(dir);
+    }
+  });
+
+  it("D127: before_review self-heal PUT targets the /complete URL id, not a stale env TASK_ID", async () => {
+    const dir = await initRepo();
+    try {
+      const hooks = await instantiate(dir);
+      await hooks["tool.execute.after"]({ input: { command: CLAIM_CMD } }, STALE_CLAIM_RESPONSE);
+      putCalls = []; // ignore any claim-path activity
+      // No healthy state on record → before_review self-heals; the re-PUT must
+      // target the URL id 42, not the stale env id 41.
+      await hooks["tool.execute.after"]({ input: { command: COMPLETE_CMD } }, "");
+      expect(putCalls.length).toBe(1);
+      expect(putCalls[0]).toContain("/api/tasks/42/changed_files");
+      expect(putCalls[0]).not.toContain("/api/tasks/41/");
+      const state = readFileSync(join(dir, ".stride-diff-upload-state"), "utf8");
+      expect(state).toBe("task_id=42\nhttp_code=200\n");
     } finally {
       cleanup(dir);
     }
@@ -1364,17 +1451,20 @@ describe("StridePlugin — W1496 env-cache persistence across restart", () => {
     }
   });
 
-  it("W1496: a corrupt cache degrades to the empty-cache behaviour without throwing", async () => {
+  it("W1496/D127: a corrupt cache no longer loses the PUT — it targets the /complete URL id", async () => {
     const dir = await initRepo();
     try {
       writeFileSync(join(dir, ".stride-env-cache"), "{corrupt");
       const hooks = await instantiate(dir);
       writeFileSync(join(dir, ".stride.md"), "## after_doing\n\n```bash\n```\n");
       await hooks["tool.execute.before"]({ input: { command: COMPLETE_CMD } });
-      // No TASK_ID → the PUT and upload-state record are skipped, but the
-      // snapshot is still written (current empty-cache behaviour).
-      expect(putCalls.length).toBe(0);
-      expect(existsSync(join(dir, ".stride-diff-upload-state"))).toBe(false);
+      // No env TASK_ID, but the /complete URL carries the authoritative id 42
+      // (D127) → the PUT and upload-state record now target it instead of being
+      // skipped. The snapshot is still written as before.
+      expect(putCalls.length).toBe(1);
+      expect(putCalls[0]).toContain("/api/tasks/42/changed_files");
+      const state = readFileSync(join(dir, ".stride-diff-upload-state"), "utf8");
+      expect(state).toBe("task_id=42\nhttp_code=200\n");
       expect(existsSync(join(dir, ".stride-changed-files.json"))).toBe(true);
     } finally {
       cleanup(dir);

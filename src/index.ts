@@ -65,6 +65,25 @@ const CLAIM_PATTERN = /\/api\/tasks\/claim/;
 const COMPLETE_PATTERN = /\/api\/tasks\/[^/]+\/complete/;
 const MARK_REVIEWED_PATTERN = /\/api\/tasks\/[^/]+\/mark_reviewed/;
 
+// (D127) Extract the authoritative numeric task id from a /complete or
+// /mark_reviewed command URL. The after_doing finalize and before_review
+// self-heal paths always process such a command, whose URL carries the real
+// task id — preferring it over the env-cache TASK_ID guards against a stale or
+// corrupt cache targeting the changed_files PUT at the wrong (previous) task.
+// Pure string parse, no network call. Mirrors task_id_from_command in
+// stride/hooks/stride-hook.sh: only a bare numeric id is accepted; a claim/next
+// URL or a non-numeric segment yields null (the caller then falls back to the
+// env-cache id). The capturing, digit-only regex is intentionally distinct from
+// the structural COMPLETE_PATTERN / MARK_REVIEWED_PATTERN above, which route on
+// shape (any segment) rather than identity.
+const TASK_ID_FROM_COMMAND_PATTERN =
+  /\/api\/tasks\/(\d+)\/(?:complete|mark_reviewed)/;
+
+export function taskIdFromCommand(command: string): string | null {
+  const match = TASK_ID_FROM_COMMAND_PATTERN.exec(command);
+  return match ? match[1] : null;
+}
+
 
 interface EnvCache {
   [key: string]: string;
@@ -431,26 +450,24 @@ export const StridePlugin: Plugin = async (input) => {
       // Best-effort — never throw from the capture path
     }
 
-    // PUT prerequisites: TASK_ID from the claim env cache; URL + token resolved
-    // from $projectDir/.stride_auth.md (primary, D54) with the intercepted
-    // /complete command literals as the back-compat fallback. Missing any of
-    // them is a silent no-op (the on-disk snapshot remains the fallback for
-    // older servers).
+    // PUT prerequisites: the task id preferentially resolved from the /complete
+    // command URL (D127) — authoritative even when the env cache is stale or
+    // corrupt — falling back to the claim env cache's TASK_ID only when the URL
+    // carries no id. URL + token resolved from $projectDir/.stride_auth.md
+    // (primary, D54) with the intercepted /complete command literals as the
+    // back-compat fallback. Missing any of them is a silent no-op (the on-disk
+    // snapshot remains the fallback for older servers).
+    const taskId = taskIdFromCommand(command) ?? envCache.TASK_ID;
     const apiBase = await resolveStrideApiUrl(projectDir, command);
     const token = await resolveStrideApiToken(projectDir, command);
-    const httpCode = await putChangedFiles(
-      apiBase,
-      token,
-      envCache.TASK_ID,
-      snapshot,
-    );
+    const httpCode = await putChangedFiles(apiBase, token, taskId, snapshot);
     // (W1094) Record the outcome after every actual PUT attempt so the
     // before_review self-heal can verify it on a fresh budget. A skipped PUT
     // (null — missing prerequisites) deliberately records nothing: missing
     // state means "no healthy upload on record" and the retry re-checks the
     // same prerequisites itself.
-    if (httpCode !== null && envCache.TASK_ID) {
-      await recordDiffUploadState(projectDir, envCache.TASK_ID, httpCode);
+    if (httpCode !== null && taskId) {
+      await recordDiffUploadState(projectDir, taskId, httpCode);
     }
   }
 
@@ -462,7 +479,10 @@ export const StridePlugin: Plugin = async (input) => {
   // healthy upload is on record for the current task. Best-effort: never throws.
   async function selfHealChangedFilesUpload(command: string): Promise<void> {
     await loadEnvCacheIfEmpty();
-    const taskId = envCache.TASK_ID;
+    // (D127) Prefer the id from the /complete|/mark_reviewed command URL over
+    // the env cache, so a stale cache can't self-heal the wrong task; the
+    // env-cache TASK_ID remains the fallback when the URL carries no id.
+    const taskId = taskIdFromCommand(command) ?? envCache.TASK_ID;
     if (!taskId) return;
 
     // Healthy 2xx recorded for THIS task → do not re-upload (snapshot semantics
