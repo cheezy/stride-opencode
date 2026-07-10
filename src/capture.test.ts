@@ -12,6 +12,7 @@ import {
   putChangedFiles,
   recordDiffUploadState,
   readDiffUploadState,
+  markDiffUploadUnresolved,
   writeEnvCache,
   readEnvCache,
   clearEnvCache,
@@ -583,6 +584,56 @@ describe("recordDiffUploadState / readDiffUploadState (W1094)", () => {
     const dir = mkdtempSync(join(tmpdir(), "stride-state-"));
     try {
       expect(await readDiffUploadState(dir)).toBeNull();
+    } finally {
+      cleanup(dir);
+    }
+  });
+});
+
+describe("markDiffUploadUnresolved (W1658)", () => {
+  it("appends unresolved=yes to the recorded state without a URL or token", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "stride-state-"));
+    try {
+      await recordDiffUploadState(dir, "42", 500);
+      await markDiffUploadUnresolved(dir);
+      const text = require("node:fs").readFileSync(
+        join(dir, ".stride-diff-upload-state"),
+        "utf8",
+      );
+      expect(text).toBe("task_id=42\nhttp_code=500\nunresolved=yes\n");
+      expect(text).not.toMatch(/Bearer|https?:\/\//);
+    } finally {
+      cleanup(dir);
+    }
+  });
+
+  it("is self-clearing: a subsequent record overwrites the marker away", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "stride-state-"));
+    try {
+      await recordDiffUploadState(dir, "42", 500);
+      await markDiffUploadUnresolved(dir);
+      // A later successful PUT records anew — the overwrite drops the marker.
+      await recordDiffUploadState(dir, "42", 200);
+      const text = require("node:fs").readFileSync(
+        join(dir, ".stride-diff-upload-state"),
+        "utf8",
+      );
+      expect(text).toBe("task_id=42\nhttp_code=200\n");
+      expect(text).not.toContain("unresolved");
+    } finally {
+      cleanup(dir);
+    }
+  });
+
+  it("writes the marker even when no state file exists yet (best-effort)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "stride-state-"));
+    try {
+      await markDiffUploadUnresolved(dir);
+      const text = require("node:fs").readFileSync(
+        join(dir, ".stride-diff-upload-state"),
+        "utf8",
+      );
+      expect(text).toBe("unresolved=yes\n");
     } finally {
       cleanup(dir);
     }

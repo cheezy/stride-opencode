@@ -794,6 +794,91 @@ describe("StridePlugin — W1093 early capture + W1094 self-heal", () => {
     }
   });
 
+  it("W1658: a terminal non-2xx self-heal PUT logs UNRESOLVED, marks the state file, and never vetoes completion", async () => {
+    const dir = await initRepo();
+    const origError = console.error;
+    const errLines: string[] = [];
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    console.error = (...args: any[]) => {
+      errLines.push(args.join(" "));
+    };
+    try {
+      const hooks = await instantiate(dir);
+      await hooks["tool.execute.after"]({ input: { command: CLAIM_CMD } }, CLAIM_RESPONSE);
+      putCalls = [];
+      nextStatus = 500; // force the before_review self-heal PUT to fail terminally
+      // before_review runs on the tool.execute.after pass over the /complete
+      // command; with no healthy state on record it self-heals, PUTs 500.
+      let threw = false;
+      try {
+        await hooks["tool.execute.after"]({ input: { command: COMPLETE_CMD } }, "");
+      } catch {
+        threw = true;
+      }
+      expect(threw).toBe(false); // fail-soft — the completion is never vetoed
+      expect(putCalls.length).toBe(1);
+      // The record write (overwrite) plus the appended unresolved marker.
+      const state = readFileSync(join(dir, ".stride-diff-upload-state"), "utf8");
+      expect(state).toBe("task_id=42\nhttp_code=500\nunresolved=yes\n");
+      // The distinct terminal message (separate from the per-attempt warning).
+      expect(
+        errLines.some((l) =>
+          l.includes("CHANGED_FILES UPLOAD UNRESOLVED for task 42 (HTTP 500)"),
+        ),
+      ).toBe(true);
+    } finally {
+      console.error = origError;
+      cleanup(dir);
+    }
+  });
+
+  it("W1658: a 2xx self-heal PUT (incl. a legitimately-empty diff) takes the success path — no UNRESOLVED, no marker", async () => {
+    const dir = await initRepo();
+    const origError = console.error;
+    const errLines: string[] = [];
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    console.error = (...args: any[]) => {
+      errLines.push(args.join(" "));
+    };
+    try {
+      const hooks = await instantiate(dir);
+      await hooks["tool.execute.after"]({ input: { command: CLAIM_CMD } }, CLAIM_RESPONSE);
+      putCalls = [];
+      nextStatus = 200; // healthy upload
+      await hooks["tool.execute.after"]({ input: { command: COMPLETE_CMD } }, "");
+      expect(putCalls.length).toBe(1);
+      const state = readFileSync(join(dir, ".stride-diff-upload-state"), "utf8");
+      expect(state).toBe("task_id=42\nhttp_code=200\n"); // no unresolved marker
+      expect(errLines.some((l) => l.includes("UNRESOLVED"))).toBe(false);
+    } finally {
+      console.error = origError;
+      cleanup(dir);
+    }
+  });
+
+  it("W1658: a later 2xx PUT overwrites the state file and self-clears the unresolved mark", async () => {
+    const dir = await initRepo();
+    try {
+      const hooks = await instantiate(dir);
+      await hooks["tool.execute.after"]({ input: { command: CLAIM_CMD } }, CLAIM_RESPONSE);
+      // First self-heal fails terminally → marks unresolved.
+      nextStatus = 500;
+      await hooks["tool.execute.after"]({ input: { command: COMPLETE_CMD } }, "");
+      expect(
+        readFileSync(join(dir, ".stride-diff-upload-state"), "utf8"),
+      ).toContain("unresolved=yes");
+      // A later self-heal lands 2xx → recordDiffUploadState overwrites the whole
+      // file, so the unresolved mark self-clears.
+      nextStatus = 200;
+      await hooks["tool.execute.after"]({ input: { command: COMPLETE_CMD } }, "");
+      const state = readFileSync(join(dir, ".stride-diff-upload-state"), "utf8");
+      expect(state).toBe("task_id=42\nhttp_code=200\n");
+      expect(state).not.toContain("unresolved");
+    } finally {
+      cleanup(dir);
+    }
+  });
+
   it("W1094: after_review cleanup removes the upload state", async () => {
     const dir = await initRepo();
     try {

@@ -13,6 +13,7 @@ import {
   putChangedFiles,
   recordDiffUploadState,
   readDiffUploadState,
+  markDiffUploadUnresolved,
   writeEnvCache,
   readEnvCache,
   clearEnvCache,
@@ -33,6 +34,7 @@ export {
   putChangedFiles,
   recordDiffUploadState,
   readDiffUploadState,
+  markDiffUploadUnresolved,
   writeEnvCache,
   readEnvCache,
   clearEnvCache,
@@ -506,6 +508,20 @@ export const StridePlugin: Plugin = async (input) => {
     const httpCode = await putChangedFiles(apiBase, token, taskId, snapshot);
     if (httpCode !== null) {
       await recordDiffUploadState(projectDir, taskId, httpCode);
+      // (W1658) before_review is the LAST upload retry. A non-2xx here — an
+      // error status or a transport failure (putChangedFiles returns 0) — means
+      // the changed_files diff is definitively lost for this task. Surface it
+      // LOUDLY, distinct from the per-attempt warning inside putChangedFiles,
+      // and append an `unresolved=yes` marker so the failure is queryable rather
+      // than silently swallowed. Fail-soft: this never vetoes the
+      // already-succeeded /complete. A later successful PUT calls
+      // recordDiffUploadState, which overwrites the file and clears the mark.
+      if (httpCode < 200 || httpCode >= 300) {
+        console.error(
+          `stride-hook: CHANGED_FILES UPLOAD UNRESOLVED for task ${taskId} (HTTP ${httpCode}) after the before_review retry — the review will show NO file diffs. Re-run the changed_files PUT to recover.`,
+        );
+        await markDiffUploadUnresolved(projectDir);
+      }
     }
   }
 

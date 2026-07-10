@@ -520,6 +520,33 @@ export async function recordDiffUploadState(
 }
 
 /**
+ * (W1658) Append the terminal `unresolved=yes` marker to the diff-upload state
+ * file after the before_review self-heal — the LAST upload retry — still failed
+ * to land a 2xx. Additive to the `task_id` / `http_code` lines written by
+ * {@link recordDiffUploadState}: a later successful PUT calls that writer, which
+ * OVERWRITES the whole file and thereby self-clears this mark. Carries no URL or
+ * bearer token — only the marker line. Best-effort: a failed write must never
+ * block completion.
+ */
+export async function markDiffUploadUnresolved(
+  projectDir: string,
+): Promise<void> {
+  const path = `${projectDir}/.stride-diff-upload-state`;
+  try {
+    let existing = "";
+    try {
+      const file = Bun.file(path);
+      if (await file.exists()) existing = await file.text();
+    } catch {
+      existing = "";
+    }
+    await Bun.write(path, `${existing}unresolved=yes\n`);
+  } catch {
+    // best-effort — never block on a failed state write
+  }
+}
+
+/**
  * (W1094) Read the recorded changed_files upload outcome, or `null` when the
  * state file is absent or unreadable (treated as "no healthy upload on
  * record"). Parses only `task_id` and `http_code` lines.
