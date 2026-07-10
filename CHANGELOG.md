@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.26.1] - 2026-07-10
+
+### Fixed — target the changed_files upload by the `/complete` URL id (D127)
+
+The `after_doing` finalize and `before_review` self-heal previously targeted the changed_files PUT using the claim-time env-cache `TASK_ID`. When that cache is stale or corrupt (a piped/truncated claim capture, or a host restart before the on-disk cache reloads), the diff was uploaded to the **previous** task, leaving the current task's `changed_files` empty. Both paths now resolve the task id from the authoritative `/complete|/mark_reviewed` command URL first, via a new `taskIdFromCommand(command)` helper (a pure, digit-only parse mirroring `task_id_from_command` in `stride/hooks/stride-hook.sh`), falling back to the env-cache id only when the URL carries no id (the claim path). Pure string parse — no new network call.
+
+### Added — fail loud on a terminal changed_files upload failure (W1658)
+
+The `before_review` self-heal is the **last** upload retry. When its PUT still returns a non-2xx status (or a transport failure, which `putChangedFiles` maps to `0`), the plugin now logs a distinct `stride-hook: CHANGED_FILES UPLOAD UNRESOLVED for task <id> (HTTP <code>) …` message to stderr and appends an `unresolved=yes` marker to `.stride-diff-upload-state` (new `markDiffUploadUnresolved` helper in `src/capture.ts`), so a definitively-lost diff is actionable rather than silently swallowed. Fail-soft: this never vetoes the already-succeeded `/complete`. A legitimately-empty diff that PUTs 2xx takes the success path, and a later successful PUT overwrites the state file, self-clearing the mark.
+
 ## [1.26.0] - 2026-07-09
 
 ### Added — `after_goal` reliability port: canonical response file + fresh-GET guarantee (G4969: W1636–W1640)
