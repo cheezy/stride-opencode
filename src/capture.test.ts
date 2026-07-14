@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { $ } from "bun";
 import {
   captureChangedFiles,
+  resolveSnapshotBase,
   extractApiBase,
   extractToken,
   resolveStrideApiUrl,
@@ -1040,6 +1041,217 @@ describe("W1639 canonical-file truncation-fallback + fresh-GET contract", () => 
       expect(status).toEqual({ armed: true, goalId: "4969", env: { GOAL_IDENTIFIER: "G227" } });
     } finally {
       globalThis.fetch = originalFetch;
+      cleanup(dir);
+    }
+  });
+});
+
+/**
+ * (D142) Trust guard for the snapshot base ref. These exercise resolveSnapshotBase
+ * directly against temp-repo fixtures that reproduce the two-clone cross-pull
+ * shape: a bare origin, clone A whose before_doing pull moves HEAD past its
+ * claim-time base, and origin/main sitting at the branch point.
+ */
+describe("resolveSnapshotBase — D142 trust guard", () => {
+  // Bare origin + clone A that has pulled another clone's commit (branch point =
+  // origin/main) and then made a local task commit on top. Returns the notable
+  // commits: prePull (clone A's base before the pull), branchPoint (origin/main
+  // after the pull), and taskCommit (HEAD, the local task commit).
+  async function crossPullRepo(): Promise<{
+    root: string;
+    cloneA: string;
+    prePull: string;
+    branchPoint: string;
+    taskCommit: string;
+  }> {
+    const root = mkdtempSync(join(tmpdir(), "stride-snapbase-"));
+    const origin = join(root, "origin.git");
+    await $`git init -q --bare ${origin}`.quiet();
+    await $`git -C ${origin} symbolic-ref HEAD refs/heads/main`.quiet();
+    const cloneA = join(root, "cloneA");
+    await $`git clone -q ${origin} ${cloneA}`.quiet();
+    await $`git -C ${cloneA} config user.email test@test.local`.quiet();
+    await $`git -C ${cloneA} config user.name Test`.quiet();
+    await $`git -C ${cloneA} config commit.gpgsign false`.quiet();
+    await $`git -C ${cloneA} checkout -q -b main`.nothrow().quiet();
+    writeFileSync(join(cloneA, "base.txt"), "base\n");
+    await $`git -C ${cloneA} add base.txt`.quiet();
+    await $`git -C ${cloneA} commit -q -m base`.quiet();
+    await $`git -C ${cloneA} push -q origin main`.quiet();
+    const prePull = (await $`git -C ${cloneA} rev-parse HEAD`.quiet())
+      .stdout.toString()
+      .trim();
+    // Clone B pushes another commit.
+    const cloneB = join(root, "cloneB");
+    await $`git clone -q ${origin} ${cloneB}`.quiet();
+    await $`git -C ${cloneB} config user.email test@test.local`.quiet();
+    await $`git -C ${cloneB} config user.name Test`.quiet();
+    await $`git -C ${cloneB} config commit.gpgsign false`.quiet();
+    writeFileSync(join(cloneB, "w1678.txt"), "other\n");
+    await $`git -C ${cloneB} add w1678.txt`.quiet();
+    await $`git -C ${cloneB} commit -q -m other`.quiet();
+    await $`git -C ${cloneB} push -q origin main`.quiet();
+    // Clone A pulls (the before_doing pull), then makes a local task commit.
+    await $`git -C ${cloneA} pull -q origin main`.quiet();
+    const branchPoint = (await $`git -C ${cloneA} rev-parse HEAD`.quiet())
+      .stdout.toString()
+      .trim();
+    writeFileSync(join(cloneA, "task.txt"), "task\n");
+    await $`git -C ${cloneA} add task.txt`.quiet();
+    await $`git -C ${cloneA} commit -q -m task`.quiet();
+    const taskCommit = (await $`git -C ${cloneA} rev-parse HEAD`.quiet())
+      .stdout.toString()
+      .trim();
+    return { root, cloneA, prePull, branchPoint, taskCommit };
+  }
+
+  it("recomputes an inherited base older than the branch point to the branch point", async () => {
+    const { root, cloneA, prePull, branchPoint } = await crossPullRepo();
+    try {
+      // prePull is an ancestor of HEAD (so a plain is-ancestor check would trust
+      // it — the exact D132 stale base) but predates the branch point.
+      const result = await resolveSnapshotBase($, cloneA, prePull, false);
+      expect(result).toBe(branchPoint);
+    } finally {
+      cleanup(root);
+    }
+  });
+
+  it("passes a TRUSTED base through unchanged (no branch-point second-guessing)", async () => {
+    const { root, cloneA, prePull } = await crossPullRepo();
+    try {
+      // A base this claim's post-before_doing capture wrote (trusted) is the
+      // branch point by construction — origin advancing past it must not trigger
+      // a recompute (push-before-complete workflows stay safe).
+      const result = await resolveSnapshotBase($, cloneA, prePull, true);
+      expect(result).toBe(prePull);
+    } finally {
+      cleanup(root);
+    }
+  });
+
+  it("passes a base equal to the branch point through unchanged", async () => {
+    const { root, cloneA, branchPoint } = await crossPullRepo();
+    try {
+      const result = await resolveSnapshotBase($, cloneA, branchPoint, false);
+      expect(result).toBe(branchPoint);
+    } finally {
+      cleanup(root);
+    }
+  });
+
+  it("recomputes an empty base to the branch point", async () => {
+    const { root, cloneA, branchPoint } = await crossPullRepo();
+    try {
+      const result = await resolveSnapshotBase($, cloneA, undefined, false);
+      expect(result).toBe(branchPoint);
+    } finally {
+      cleanup(root);
+    }
+  });
+
+  it("recomputes an unresolvable base to the branch point", async () => {
+    const { root, cloneA, branchPoint } = await crossPullRepo();
+    try {
+      const result = await resolveSnapshotBase(
+        $,
+        cloneA,
+        "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+        false,
+      );
+      expect(result).toBe(branchPoint);
+    } finally {
+      cleanup(root);
+    }
+  });
+
+  it("recomputes a base that is not an ancestor of HEAD to the branch point", async () => {
+    const { root, cloneA, branchPoint } = await crossPullRepo();
+    try {
+      // A commit on a divergent side branch: resolvable, but not an ancestor of
+      // HEAD (e.g. a base rebased away).
+      await $`git -C ${cloneA} checkout -q -b side`.quiet();
+      writeFileSync(join(cloneA, "side.txt"), "side\n");
+      await $`git -C ${cloneA} add side.txt`.quiet();
+      await $`git -C ${cloneA} commit -q -m side`.quiet();
+      const sideCommit = (await $`git -C ${cloneA} rev-parse HEAD`.quiet())
+        .stdout.toString()
+        .trim();
+      await $`git -C ${cloneA} checkout -q main`.quiet();
+      const result = await resolveSnapshotBase($, cloneA, sideCommit, false);
+      expect(result).toBe(branchPoint);
+    } finally {
+      cleanup(root);
+    }
+  });
+
+  it("announces a recompute on stderr", async () => {
+    const { root, cloneA, prePull } = await crossPullRepo();
+    const origError = console.error;
+    const lines: string[] = [];
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    console.error = (...args: any[]) => lines.push(args.join(" "));
+    try {
+      await resolveSnapshotBase($, cloneA, prePull, false);
+      expect(
+        lines.some((l) => l.includes("recomputed the snapshot base")),
+      ).toBe(true);
+    } finally {
+      console.error = origError;
+      cleanup(root);
+    }
+  });
+
+  it("passes the base through unchanged when the repo has NO origin", async () => {
+    // No origin → no branch point to judge against, and no cross-clone pull is
+    // possible, so even a bogus base passes through (capture keeps its HEAD~1
+    // fallback).
+    const { dir } = await initRepo();
+    try {
+      const bogus = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
+      const result = await resolveSnapshotBase($, dir, bogus, false);
+      expect(result).toBe(bogus);
+    } finally {
+      cleanup(dir);
+    }
+  });
+
+  it("passes the base through unchanged in a non-git directory", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "stride-snapbase-nonrepo-"));
+    try {
+      const result = await resolveSnapshotBase($, dir, "somebase", false);
+      expect(result).toBe("somebase");
+    } finally {
+      cleanup(dir);
+    }
+  });
+});
+
+describe("recordDiffUploadState / readDiffUploadState — D142 base persistence", () => {
+  it("persists and round-trips the resolved snapshot base", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "stride-uploadstate-"));
+    try {
+      await recordDiffUploadState(dir, "42", 200, "abc123def456");
+      const state = await readDiffUploadState(dir);
+      expect(state).toEqual({
+        taskId: "42",
+        httpCode: "200",
+        base: "abc123def456",
+      });
+    } finally {
+      cleanup(dir);
+    }
+  });
+
+  it("omits the base line and reports base undefined when no base is given (back-compat)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "stride-uploadstate-nobase-"));
+    try {
+      await recordDiffUploadState(dir, "42", 200);
+      const raw = await Bun.file(`${dir}/.stride-diff-upload-state`).text();
+      expect(raw).toBe("task_id=42\nhttp_code=200\n");
+      const state = await readDiffUploadState(dir);
+      expect(state?.base).toBeUndefined();
+    } finally {
       cleanup(dir);
     }
   });

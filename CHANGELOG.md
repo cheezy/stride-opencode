@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.27.0] - 2026-07-14
+
+### Fixed — capture `TASK_BASE_REF` after the `before_doing` section + trust-guard the snapshot base (D142)
+
+Ports the canonical `stride` plugin's D142 base-ref fixes (released as `stride` v1.36.0) into the opencode bridge. `TASK_BASE_REF` was captured at claim time — in the `tool.execute.after` claim block, **before** the `## before_doing` section's `git pull` moved `HEAD` — so the `after_doing` `changed_files` diff spanned commits pulled from **another clone**, and a reviewer saw another machine's completed task inside an unrelated defect's Review diff panel (the D132/W1678 incident). **Scope note:** opencode never ported the W1516 dirty-baseline filter, so the D142 D137 committed-range override has nothing to patch and is intentionally out of scope here.
+
+- **`src/index.ts` (D132)** — The `before_doing` claim block now persists task **identity only** and strips any inherited `TASK_BASE_REF` (the fresh `extractEnvFromResponse` assignment never carries a base). A new `finalizeBeforeDoing()` re-captures `HEAD` and re-persists `TASK_BASE_REF` — stamped with a `TASK_BASE_REF_TRUSTED` marker — **after** `executeCommands` returns for the `before_doing` route, regardless of the section's exit code (including the no-`.stride.md` path, where there is no section to move `HEAD`). `extractHookEnvFromResponse` now also drops a server-supplied `TASK_BASE_REF_TRUSTED` so the marker can never be spoofed.
+- **`src/capture.ts` (D132)** — New exported `resolveSnapshotBase($, cwd, base, trusted)` trust guard implementing the three reference rules — recompute an empty/unresolvable base, a non-ancestor-of-`HEAD` base, or (for **unmarked** inherited bases only) a strict-ancestor-of-branch-point base, from the task branch point (merge-base of `HEAD` and the origin default branch), with a loud `console.error` notice. A repo with no origin passes the base through unchanged. `finalizeAfterDoing` runs it **once per task window** and memoizes the judgment (the early pre-command capture sees the pre-push origin refs, so a `## after_doing` `git push` advancing `origin/main` can't make a correct base look stale and empty the snapshot); the resolved base is persisted as a `base=` line in `.stride-diff-upload-state` (via `recordDiffUploadState` / `readDiffUploadState`) so the `before_review` self-heal reuses the same judgment instead of re-resolving against moved origin refs.
+
+### Testing
+
+`bun test` (275 assertions across 5 files) and `tsc --noEmit` both pass. New coverage: `resolveSnapshotBase` unit tests over a two-clone bare-origin cross-pull fixture (recompute for older/empty/unresolvable/non-ancestor bases, passthrough for trusted, branch-point-equal, and no-origin cases, and the loud stderr notice), the `base=` round-trip in the upload-state helpers, and two end-to-end integration tests (the two-clone cross-pull excludes the other clone's pulled file and records the post-pull trusted base; a push-in-`after_doing` keeps the task's file via the once-per-window memoization and persists `base=` for the self-heal). Nine existing upload-state assertions were updated for the additive `base=` line.
+
+### Backward compatibility
+
+Backward-compatible and additive. The `TASK_BASE_REF_TRUSTED` cache key and the `base=` state line are new but tolerated when absent (an inherited cache simply gets the full trust guard; older state files report `base` as `undefined`). No marketplace change — opencode installs are a `github:` ref pin.
+
+### Source
+
+D142 — mirrors the canonical `stride` plugin at v1.36.0 (`finalize_before_doing`, `resolve_snapshot_base`, the claim identity-only strip, and the once-per-window memoization + persisted `base=`). The D137 committed-range override is out of scope (opencode has no dirty-baseline filter).
+
 ## [1.26.1] - 2026-07-10
 
 ### Fixed — target the changed_files upload by the `/complete` URL id (D127)

@@ -212,6 +212,104 @@ async function resolveBase(
   return headBack ? "HEAD~1" : null;
 }
 
+/**
+ * (D142) Trust guard for the snapshot base ref. `TASK_BASE_REF` is supposed to
+ * be the task branch point — the commit HEAD pointed at right after the
+ * `## before_doing` section finished (post-pull). A value inherited from a
+ * previous task or session can predate commits that arrived via the
+ * before_doing pull; diffing from it would span ANOTHER clone's completed task
+ * (the D132/W1678 incident). Rules, in order:
+ *   1. empty or unresolvable base                → recompute from the branch point
+ *   2. base is not an ancestor of HEAD           → recompute (e.g. rebased away)
+ *   3. base is a STRICT ancestor of the task branch point (unmarked only) →
+ *      recompute — the range base..HEAD would include commits pulled from
+ *      origin. A plain is-ancestor-of-HEAD check cannot catch this: the D132
+ *      stale base WAS an ancestor of HEAD.
+ * "Task branch point" = merge-base of HEAD and the origin default branch.
+ * Without an origin branch there is no branch point to judge against (and no
+ * cross-clone pull is possible), so the base passes through unchanged and
+ * {@link captureChangedFiles} keeps its own HEAD~1 fallback. Rule 3 is gated on
+ * `trusted`: a base THIS claim's post-before_doing capture wrote is the branch
+ * point by construction (origin/main may legitimately have advanced past it
+ * when the workflow pushes its own task commits before completing), so a marked
+ * base skips rule 3. Recomputes are announced on stderr — never silently.
+ * Returns the base ref to use (or `undefined` when there is nothing usable).
+ */
+export async function resolveSnapshotBase(
+  $: ShellHelper,
+  cwd: string,
+  base: string | undefined,
+  trusted: boolean,
+): Promise<string | undefined> {
+  if (!(await verifyRef($, cwd, "HEAD"))) return base;
+
+  // Resolve the origin default branch → its merge-base with HEAD is the branch point.
+  let remoteHead = (
+    await runGit($, cwd, ["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"])
+  ).trim();
+  if (remoteHead.startsWith("refs/remotes/")) {
+    remoteHead = remoteHead.slice("refs/remotes/".length);
+  }
+  if (!remoteHead) {
+    for (const cand of ["origin/main", "origin/master"]) {
+      if (await verifyRef($, cwd, cand)) {
+        remoteHead = cand;
+        break;
+      }
+    }
+  }
+  if (!remoteHead) return base;
+  const branchPoint = (
+    await runGit($, cwd, ["merge-base", "HEAD", remoteHead])
+  ).trim();
+  if (!branchPoint) return base;
+
+  let reason = "";
+  const baseSha = base
+    ? (await runGit($, cwd, ["rev-parse", "--verify", "--quiet", `${base}^{commit}`])).trim()
+    : "";
+  if (!base || !baseSha) {
+    reason = "empty or unresolvable";
+  } else if (!(await isAncestor($, cwd, baseSha, "HEAD"))) {
+    reason = "not an ancestor of HEAD";
+  } else if (
+    !trusted &&
+    baseSha !== branchPoint &&
+    (await isAncestor($, cwd, baseSha, branchPoint))
+  ) {
+    reason =
+      "older than the task branch point, so the diff would span commits pulled from origin";
+  }
+  if (!reason) return base;
+
+  console.error(
+    `stride-hook: TASK_BASE_REF ${base || "<empty>"} is not trustworthy (${reason}); recomputed the snapshot base from the task branch point: ${branchPoint}`,
+  );
+  return branchPoint;
+}
+
+/**
+ * `git merge-base --is-ancestor A B` — true when A is an ancestor of (or equal
+ * to) B. Any git failure (missing ref, not a repo) is treated as "not an
+ * ancestor".
+ */
+async function isAncestor(
+  $: ShellHelper,
+  cwd: string,
+  a: string,
+  b: string,
+): Promise<boolean> {
+  try {
+    const result = await $`git merge-base --is-ancestor ${a} ${b}`
+      .cwd(cwd)
+      .quiet()
+      .nothrow();
+    return result.exitCode === 0;
+  } catch {
+    return false;
+  }
+}
+
 async function verifyRef(
   $: ShellHelper,
   cwd: string,
@@ -500,19 +598,23 @@ export async function getAfterGoalStatus(
 /**
  * (W1094) Record the outcome of a changed_files PUT attempt so the
  * before_review self-heal can verify it on a fresh budget. Writes ONLY the
- * task id and HTTP code — never the URL or bearer token — to
- * `${projectDir}/.stride-diff-upload-state`. Best-effort: a failed write must
- * never block completion.
+ * task id, HTTP code, and (D142) the trust-guard-resolved snapshot base —
+ * never the URL or bearer token — to `${projectDir}/.stride-diff-upload-state`.
+ * The base lets the self-heal reuse the after_doing-time judgment instead of
+ * re-resolving against origin refs the section's own `git push` may have moved.
+ * Best-effort: a failed write must never block completion.
  */
 export async function recordDiffUploadState(
   projectDir: string,
   taskId: string,
   httpCode: number,
+  base?: string,
 ): Promise<void> {
   try {
+    const baseLine = base ? `base=${base}\n` : "";
     await Bun.write(
       `${projectDir}/.stride-diff-upload-state`,
-      `task_id=${taskId}\nhttp_code=${httpCode}\n`,
+      `task_id=${taskId}\nhttp_code=${httpCode}\n${baseLine}`,
     );
   } catch {
     // best-effort — never block on a failed state write
@@ -549,17 +651,19 @@ export async function markDiffUploadUnresolved(
 /**
  * (W1094) Read the recorded changed_files upload outcome, or `null` when the
  * state file is absent or unreadable (treated as "no healthy upload on
- * record"). Parses only `task_id` and `http_code` lines.
+ * record"). Parses `task_id`, `http_code`, and (D142) the resolved snapshot
+ * `base` lines; `base` is `undefined` on older state files that predate it.
  */
 export async function readDiffUploadState(
   projectDir: string,
-): Promise<{ taskId: string; httpCode: string } | null> {
+): Promise<{ taskId: string; httpCode: string; base?: string } | null> {
   try {
     const file = Bun.file(`${projectDir}/.stride-diff-upload-state`);
     if (!(await file.exists())) return null;
     const text = await file.text();
     let taskId = "";
     let httpCode = "";
+    let base: string | undefined;
     for (const line of text.split("\n")) {
       const eq = line.indexOf("=");
       if (eq === -1) continue;
@@ -567,8 +671,9 @@ export async function readDiffUploadState(
       const value = line.slice(eq + 1).trim();
       if (key === "task_id" && !taskId) taskId = value;
       else if (key === "http_code" && !httpCode) httpCode = value;
+      else if (key === "base" && base === undefined) base = value;
     }
-    return { taskId, httpCode };
+    return { taskId, httpCode, base };
   } catch {
     return null;
   }

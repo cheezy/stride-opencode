@@ -645,7 +645,7 @@ describe("StridePlugin — W1093 early capture + W1094 self-heal", () => {
       expect(existsSync(join(dir, ".stride-changed-files.json"))).toBe(true);
       expect(putCalls.length).toBe(1);
       const state = readFileSync(join(dir, ".stride-diff-upload-state"), "utf8");
-      expect(state).toBe("task_id=42\nhttp_code=200\n");
+      expect(state).toMatch(/^task_id=42\nhttp_code=200\nbase=[0-9a-f]{40}\n$/);
     } finally {
       cleanup(dir);
     }
@@ -688,7 +688,7 @@ describe("StridePlugin — W1093 early capture + W1094 self-heal", () => {
       await hooks["tool.execute.after"]({ input: { command: COMPLETE_CMD } }, "");
       expect(putCalls.length).toBe(1);
       const state = readFileSync(join(dir, ".stride-diff-upload-state"), "utf8");
-      expect(state).toBe("task_id=42\nhttp_code=200\n");
+      expect(state).toMatch(/^task_id=42\nhttp_code=200\nbase=[0-9a-f]{40}\n$/);
     } finally {
       cleanup(dir);
     }
@@ -718,7 +718,7 @@ describe("StridePlugin — W1093 early capture + W1094 self-heal", () => {
       await hooks["tool.execute.after"]({ input: { command: COMPLETE_CMD } }, "");
       expect(putCalls.length).toBe(1);
       const state = readFileSync(join(dir, ".stride-diff-upload-state"), "utf8");
-      expect(state).toBe("task_id=42\nhttp_code=200\n");
+      expect(state).toMatch(/^task_id=42\nhttp_code=200\nbase=[0-9a-f]{40}\n$/);
     } finally {
       cleanup(dir);
     }
@@ -769,7 +769,7 @@ describe("StridePlugin — W1093 early capture + W1094 self-heal", () => {
       expect(putCalls[0]).toContain("/api/tasks/42/changed_files");
       expect(putCalls[0]).not.toContain("/api/tasks/41/");
       const state = readFileSync(join(dir, ".stride-diff-upload-state"), "utf8");
-      expect(state).toBe("task_id=42\nhttp_code=200\n");
+      expect(state).toMatch(/^task_id=42\nhttp_code=200\nbase=[0-9a-f]{40}\n$/);
     } finally {
       cleanup(dir);
     }
@@ -788,7 +788,7 @@ describe("StridePlugin — W1093 early capture + W1094 self-heal", () => {
       expect(putCalls[0]).toContain("/api/tasks/42/changed_files");
       expect(putCalls[0]).not.toContain("/api/tasks/41/");
       const state = readFileSync(join(dir, ".stride-diff-upload-state"), "utf8");
-      expect(state).toBe("task_id=42\nhttp_code=200\n");
+      expect(state).toMatch(/^task_id=42\nhttp_code=200\nbase=[0-9a-f]{40}\n$/);
     } finally {
       cleanup(dir);
     }
@@ -819,7 +819,9 @@ describe("StridePlugin — W1093 early capture + W1094 self-heal", () => {
       expect(putCalls.length).toBe(1);
       // The record write (overwrite) plus the appended unresolved marker.
       const state = readFileSync(join(dir, ".stride-diff-upload-state"), "utf8");
-      expect(state).toBe("task_id=42\nhttp_code=500\nunresolved=yes\n");
+      expect(state).toMatch(
+        /^task_id=42\nhttp_code=500\nbase=[0-9a-f]{40}\nunresolved=yes\n$/,
+      );
       // The distinct terminal message (separate from the per-attempt warning).
       expect(
         errLines.some((l) =>
@@ -848,7 +850,7 @@ describe("StridePlugin — W1093 early capture + W1094 self-heal", () => {
       await hooks["tool.execute.after"]({ input: { command: COMPLETE_CMD } }, "");
       expect(putCalls.length).toBe(1);
       const state = readFileSync(join(dir, ".stride-diff-upload-state"), "utf8");
-      expect(state).toBe("task_id=42\nhttp_code=200\n"); // no unresolved marker
+      expect(state).toMatch(/^task_id=42\nhttp_code=200\nbase=[0-9a-f]{40}\n$/); // no unresolved marker
       expect(errLines.some((l) => l.includes("UNRESOLVED"))).toBe(false);
     } finally {
       console.error = origError;
@@ -872,7 +874,7 @@ describe("StridePlugin — W1093 early capture + W1094 self-heal", () => {
       nextStatus = 200;
       await hooks["tool.execute.after"]({ input: { command: COMPLETE_CMD } }, "");
       const state = readFileSync(join(dir, ".stride-diff-upload-state"), "utf8");
-      expect(state).toBe("task_id=42\nhttp_code=200\n");
+      expect(state).toMatch(/^task_id=42\nhttp_code=200\nbase=[0-9a-f]{40}\n$/);
       expect(state).not.toContain("unresolved");
     } finally {
       cleanup(dir);
@@ -894,6 +896,145 @@ describe("StridePlugin — W1093 early capture + W1094 self-heal", () => {
       expect(existsSync(join(dir, ".stride-diff-upload-state"))).toBe(false);
     } finally {
       cleanup(dir);
+    }
+  });
+
+  it("D142: two-clone cross-pull — the claim captures the POST-pull base and the completed snapshot excludes the other clone's pulled file", async () => {
+    const root = mkdtempSync(join(tmpdir(), "stride-oc-d142-"));
+    try {
+      const origin = join(root, "origin.git");
+      await $`git init -q --bare ${origin}`.quiet();
+      await $`git -C ${origin} symbolic-ref HEAD refs/heads/main`.quiet();
+      const cloneA = join(root, "cloneA");
+      await $`git clone -q ${origin} ${cloneA}`.quiet();
+      await $`git -C ${cloneA} config user.email test@test.local`.quiet();
+      await $`git -C ${cloneA} config user.name Test`.quiet();
+      await $`git -C ${cloneA} config commit.gpgsign false`.quiet();
+      await $`git -C ${cloneA} checkout -q -b main`.nothrow().quiet();
+      writeFileSync(
+        join(cloneA, ".gitignore"),
+        ".stride.md\n.stride-changed-files.json\n.stride-diff-upload-state\n.stride-env-cache\n",
+      );
+      writeFileSync(join(cloneA, "base.txt"), "base\n");
+      await $`git -C ${cloneA} add .gitignore base.txt`.quiet();
+      await $`git -C ${cloneA} commit -q -m base`.quiet();
+      await $`git -C ${cloneA} push -q origin main`.quiet();
+      // Clone B (another computer) pushes a completed task.
+      const cloneB = join(root, "cloneB");
+      await $`git clone -q ${origin} ${cloneB}`.quiet();
+      await $`git -C ${cloneB} config user.email test@test.local`.quiet();
+      await $`git -C ${cloneB} config user.name Test`.quiet();
+      await $`git -C ${cloneB} config commit.gpgsign false`.quiet();
+      writeFileSync(join(cloneB, "w1678.txt"), "other\n");
+      await $`git -C ${cloneB} add w1678.txt`.quiet();
+      await $`git -C ${cloneB} commit -q -m other`.quiet();
+      await $`git -C ${cloneB} push -q origin main`.quiet();
+      // Clone A's before_doing pulls; after_doing commits the task work.
+      writeFileSync(
+        join(cloneA, ".stride.md"),
+        "## before_doing\n\n```bash\ngit pull -q origin main\n```\n\n## after_doing\n\n```bash\ngit add -A\ngit commit -q -m task\n```\n",
+      );
+      // A stale base from a "previous session" that MUST be replaced.
+      writeFileSync(
+        join(cloneA, ".stride-env-cache"),
+        '{"TASK_ID":"OLD1","TASK_BASE_REF":"1111111111111111111111111111111111111111"}\n',
+      );
+      const prePull = (await $`git -C ${cloneA} rev-parse HEAD`.quiet())
+        .stdout.toString()
+        .trim();
+      const hooks = await instantiate(cloneA);
+      // Claim → runs the before_doing pull, then finalizeBeforeDoing (post-section).
+      await hooks["tool.execute.after"](
+        { input: { command: CLAIM_CMD } },
+        CLAIM_RESPONSE,
+      );
+      const postPull = (await $`git -C ${cloneA} rev-parse HEAD`.quiet())
+        .stdout.toString()
+        .trim();
+      // Fixture discriminating power: the pull actually moved HEAD.
+      expect(postPull).not.toBe(prePull);
+      const cache = JSON.parse(
+        readFileSync(join(cloneA, ".stride-env-cache"), "utf8"),
+      );
+      expect(cache.TASK_BASE_REF).toBe(postPull);
+      expect(cache.TASK_BASE_REF_TRUSTED).toBe("1");
+      expect(cache.TASK_BASE_REF).not.toBe(
+        "1111111111111111111111111111111111111111",
+      );
+      // Task work + complete: the snapshot must contain only clone A's file.
+      writeFileSync(join(cloneA, "task.txt"), "task work\n");
+      putCalls = [];
+      await hooks["tool.execute.before"]({
+        input: { command: COMPLETE_CMD },
+      });
+      const snap: { path: string }[] = JSON.parse(
+        readFileSync(join(cloneA, ".stride-changed-files.json"), "utf8"),
+      );
+      const paths = snap.map((e) => e.path);
+      expect(paths).toContain("task.txt");
+      expect(paths).not.toContain("w1678.txt");
+    } finally {
+      cleanup(root);
+    }
+  });
+
+  it("D142: a push-in-after_doing keeps the task's file (base resolved once, pre-push) and persists it for the self-heal", async () => {
+    const root = mkdtempSync(join(tmpdir(), "stride-oc-d142-push-"));
+    try {
+      const origin = join(root, "origin.git");
+      await $`git init -q --bare ${origin}`.quiet();
+      await $`git -C ${origin} symbolic-ref HEAD refs/heads/main`.quiet();
+      const work = join(root, "work");
+      await $`git clone -q ${origin} ${work}`.quiet();
+      await $`git -C ${work} config user.email test@test.local`.quiet();
+      await $`git -C ${work} config user.name Test`.quiet();
+      await $`git -C ${work} config commit.gpgsign false`.quiet();
+      await $`git -C ${work} checkout -q -b main`.nothrow().quiet();
+      writeFileSync(
+        join(work, ".gitignore"),
+        ".stride.md\n.stride-changed-files.json\n.stride-diff-upload-state\n.stride-env-cache\n",
+      );
+      writeFileSync(join(work, "tracked.txt"), "v1\n");
+      await $`git -C ${work} add .gitignore tracked.txt`.quiet();
+      await $`git -C ${work} commit -q -m v1`.quiet();
+      await $`git -C ${work} push -q origin main`.quiet();
+      const base = (await $`git -C ${work} rev-parse HEAD`.quiet())
+        .stdout.toString()
+        .trim();
+      // Task work committed locally but not yet pushed.
+      writeFileSync(join(work, "tracked.txt"), "v2\n");
+      await $`git -C ${work} add tracked.txt`.quiet();
+      await $`git -C ${work} commit -q -m "task work"`.quiet();
+      // after_doing pushes the default branch, advancing origin/main to HEAD.
+      writeFileSync(
+        join(work, ".stride.md"),
+        "## after_doing\n\n```bash\ngit push -q origin main\n```\n",
+      );
+      // Untrusted inherited base (no TASK_BASE_REF_TRUSTED) to exercise the guard.
+      writeFileSync(
+        join(work, ".stride-env-cache"),
+        `{"TASK_ID":"55","TASK_BASE_REF":"${base}"}\n`,
+      );
+      const hooks = await instantiate(work);
+      putCalls = [];
+      await hooks["tool.execute.before"]({
+        input: { command: COMPLETE_CMD },
+      });
+      const snap: { path: string }[] = JSON.parse(
+        readFileSync(join(work, ".stride-changed-files.json"), "utf8"),
+      );
+      const paths = snap.map((e) => e.path);
+      // Without the once-per-window memoization the post-push refresh would
+      // re-resolve against the moved origin/main, recompute the base to HEAD,
+      // and empty the snapshot.
+      expect(paths).toContain("tracked.txt");
+      const state = readFileSync(
+        join(work, ".stride-diff-upload-state"),
+        "utf8",
+      );
+      expect(state).toContain(`base=${base}`);
+    } finally {
+      cleanup(root);
     }
   });
 });
@@ -1475,7 +1616,7 @@ describe("StridePlugin — W1496 env-cache persistence across restart", () => {
       expect(putCalls.length).toBe(1);
       expect(putCalls[0]).toContain("/api/tasks/42/changed_files");
       const state = readFileSync(join(dir, ".stride-diff-upload-state"), "utf8");
-      expect(state).toBe("task_id=42\nhttp_code=200\n");
+      expect(state).toMatch(/^task_id=42\nhttp_code=200\nbase=[0-9a-f]{40}\n$/);
       const snapshot = JSON.parse(
         readFileSync(join(dir, ".stride-changed-files.json"), "utf8"),
       ) as { path: string }[];
@@ -1549,6 +1690,8 @@ describe("StridePlugin — W1496 env-cache persistence across restart", () => {
       expect(putCalls.length).toBe(1);
       expect(putCalls[0]).toContain("/api/tasks/42/changed_files");
       const state = readFileSync(join(dir, ".stride-diff-upload-state"), "utf8");
+      // No claim ran and the cache is corrupt → no TASK_BASE_REF, so the D142
+      // base line is absent (resolveSnapshotBase passed through undefined).
       expect(state).toBe("task_id=42\nhttp_code=200\n");
       expect(existsSync(join(dir, ".stride-changed-files.json"))).toBe(true);
     } finally {

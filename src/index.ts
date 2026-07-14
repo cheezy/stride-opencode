@@ -8,6 +8,7 @@ import {
 } from "./hook-exec";
 import {
   captureChangedFiles,
+  resolveSnapshotBase,
   resolveStrideApiUrl,
   resolveStrideApiToken,
   putChangedFiles,
@@ -27,6 +28,7 @@ export { parseStrideMd, buildCommandList, buildCommandList as filterCommands, ty
 export { gateSkillActivation, gateToolCall, SKILL_ACTIVATION_TOOLS, PROTECTED_SUB_SKILLS } from "./skill-gate";
 export {
   captureChangedFiles,
+  resolveSnapshotBase,
   extractApiBase,
   extractToken,
   resolveStrideApiUrl,
@@ -336,9 +338,10 @@ export function responseHasAfterGoal(output: unknown): boolean {
  * servers omit hooks entirely — that is not an error), so keys the server
  * omits are simply absent, never invented.
  *
- * TASK_BASE_REF is dropped — it is the client-owned diff anchor and must
- * never be server-overridden. HOOK_NAME IS returned (callers deliver it
- * ephemerally but exclude it from the persisted cache, where a stale value
+ * TASK_BASE_REF (and its D142 TASK_BASE_REF_TRUSTED marker) are dropped — they
+ * are the client-owned diff anchor and its trust flag, and must never be
+ * server-overridden or server-spoofed. HOOK_NAME IS returned (callers deliver
+ * it ephemerally but exclude it from the persisted cache, where a stale value
  * would mislead later hooks).
  */
 export function extractHookEnvFromResponse(
@@ -365,7 +368,7 @@ export function extractHookEnvFromResponse(
   const env: EnvCache = {};
   for (const [key, value] of Object.entries(rawEnv)) {
     if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) continue;
-    if (key === "TASK_BASE_REF") continue;
+    if (key === "TASK_BASE_REF" || key === "TASK_BASE_REF_TRUSTED") continue;
     if (typeof value === "string") env[key] = value;
     else if (typeof value === "number" || typeof value === "boolean")
       env[key] = String(value);
@@ -388,6 +391,14 @@ export const StridePlugin: Plugin = async (input) => {
   const projectDir = worktree || directory;
   let envCache: EnvCache = {};
   const snapshotPath = `${projectDir}/.stride-changed-files.json`;
+  // (D142) The trust-guard judgment for the snapshot base is resolved ONCE per
+  // task window and memoized. The early after_doing capture (before the section
+  // commands run) sees the pre-push origin refs, so it is authoritative for the
+  // whole window — a later ## after_doing `git push` moving origin/main must
+  // never make a correct base look stale and recompute it to HEAD (empty
+  // snapshot). Reset on each before_doing claim (a new task window).
+  let snapBaseResolved: string | undefined;
+  let snapBaseResolvedDone = false;
 
   // Capture git HEAD as TASK_BASE_REF so finalize_after_doing has an anchor.
   async function captureBaseRef(): Promise<string | undefined> {
@@ -401,6 +412,39 @@ export const StridePlugin: Plugin = async (input) => {
     } catch {
       return undefined;
     }
+  }
+
+  // (D142) Run the base through the trust guard once per task window and
+  // memoize the judgment (see the SNAP_BASE fields above).
+  async function resolvedSnapshotBase(): Promise<string | undefined> {
+    if (!snapBaseResolvedDone) {
+      snapBaseResolved = await resolveSnapshotBase(
+        $,
+        projectDir,
+        envCache.TASK_BASE_REF,
+        envCache.TASK_BASE_REF_TRUSTED === "1",
+      );
+      snapBaseResolvedDone = true;
+    }
+    return snapBaseResolved;
+  }
+
+  // (D142) Rewrite TASK_BASE_REF AFTER the ## before_doing section has run. The
+  // section's `git pull` moves HEAD, so a base captured at claim time (before
+  // the section) anchors the after_doing diff at the PRE-pull commit and the
+  // snapshot spans another clone's pulled work (the D132/W1678 incident). Runs
+  // regardless of the section's exit code — the claim already succeeded, and a
+  // partially-run section still leaves HEAD more accurate than the pre-pull
+  // value. Stamps TASK_BASE_REF_TRUSTED so resolveSnapshotBase's branch-point
+  // rule does not second-guess a base this capture wrote (the task branch point
+  // by construction). Skips silently when HEAD is unresolvable (not a git repo)
+  // — the claim block already left the cache with no inherited base.
+  async function finalizeBeforeDoing(): Promise<void> {
+    const baseRef = await captureBaseRef();
+    if (!baseRef) return;
+    envCache.TASK_BASE_REF = baseRef;
+    envCache.TASK_BASE_REF_TRUSTED = "1";
+    await writeEnvCache(projectDir, envCache);
   }
 
   // Remove a stale .stride-changed-files.json from a prior task so the new
@@ -440,13 +484,14 @@ export const StridePlugin: Plugin = async (input) => {
   // ({changed_files: [...]}) to v1.16.0+ servers.
   async function finalizeAfterDoing(command: string): Promise<void> {
     await loadEnvCacheIfEmpty();
+    // (D142) Resolve the base through the trust guard once per task window (see
+    // resolvedSnapshotBase) so an inherited/stale base never anchors the diff at
+    // another clone's pulled work, and an after_doing `git push` cannot empty
+    // the snapshot by advancing origin/main past a correct base.
+    const snapBase = await resolvedSnapshotBase();
     let snapshot: { path: string; diff: string }[] = [];
     try {
-      snapshot = await captureChangedFiles(
-        $,
-        projectDir,
-        envCache.TASK_BASE_REF,
-      );
+      snapshot = await captureChangedFiles($, projectDir, snapBase);
       await Bun.write(snapshotPath, JSON.stringify(snapshot, null, 2) + "\n");
     } catch {
       // Best-effort — never throw from the capture path
@@ -467,9 +512,11 @@ export const StridePlugin: Plugin = async (input) => {
     // before_review self-heal can verify it on a fresh budget. A skipped PUT
     // (null — missing prerequisites) deliberately records nothing: missing
     // state means "no healthy upload on record" and the retry re-checks the
-    // same prerequisites itself.
+    // same prerequisites itself. (D142) The resolved base rides along so the
+    // self-heal reuses this task window's judgment instead of re-resolving
+    // against origin refs the section's own push may have moved.
     if (httpCode !== null && taskId) {
-      await recordDiffUploadState(projectDir, taskId, httpCode);
+      await recordDiffUploadState(projectDir, taskId, httpCode, snapBase);
     }
   }
 
@@ -497,17 +544,33 @@ export const StridePlugin: Plugin = async (input) => {
     const token = await resolveStrideApiToken(projectDir, command);
     if (!apiBase || !token) return;
 
-    // Re-capture against the claim-time base ref and re-PUT.
+    // (D142) Prefer the base finalizeAfterDoing resolved and persisted for THIS
+    // task — re-resolving here would re-judge against origin refs the
+    // after_doing section's own `git push` may have moved (a correct base would
+    // look stale and recompute to HEAD, emptying the snapshot). Only when no
+    // persisted judgment exists (process killed before any PUT) run the trust
+    // guard fresh — the retry must never resurrect a stale base the primary
+    // capture would have refused.
+    const snapBase =
+      state && state.taskId === taskId && state.base !== undefined
+        ? state.base
+        : await resolveSnapshotBase(
+            $,
+            projectDir,
+            envCache.TASK_BASE_REF,
+            envCache.TASK_BASE_REF_TRUSTED === "1",
+          );
+    // Re-capture against the resolved base ref and re-PUT.
     let snapshot: { path: string; diff: string }[] = [];
     try {
-      snapshot = await captureChangedFiles($, projectDir, envCache.TASK_BASE_REF);
+      snapshot = await captureChangedFiles($, projectDir, snapBase);
       await Bun.write(snapshotPath, JSON.stringify(snapshot, null, 2) + "\n");
     } catch {
       // Best-effort — never throw from the capture path
     }
     const httpCode = await putChangedFiles(apiBase, token, taskId, snapshot);
     if (httpCode !== null) {
-      await recordDiffUploadState(projectDir, taskId, httpCode);
+      await recordDiffUploadState(projectDir, taskId, httpCode, snapBase);
       // (W1658) before_review is the LAST upload retry. A non-2xx here — an
       // error status or a transport failure (putChangedFiles returns 0) — means
       // the changed_files diff is definitively lost for this task. Surface it
@@ -713,15 +776,17 @@ export const StridePlugin: Plugin = async (input) => {
         if (responseText) {
           // (W1496) Fresh assignment, not a merge — a prior task's leftover
           // fields must not survive into the new claim (mirrors the bash
-          // hook's truncating rewrite of .stride-env-cache on claim).
+          // hook's truncating rewrite of .stride-env-cache on claim). This also
+          // strips any inherited TASK_BASE_REF / TASK_BASE_REF_TRUSTED — the
+          // claim writes IDENTITY only; finalizeBeforeDoing writes the base
+          // AFTER the ## before_doing section's `git pull` (D142/D132).
           envCache = { ...extractEnvFromResponse(responseText) };
           envExtracted = true;
         }
-        // Capture current git HEAD as TASK_BASE_REF so capture_changed_files
-        // has an anchor when after_doing runs. Best-effort — non-git
-        // projects just won't get the env var.
-        const baseRef = await captureBaseRef();
-        if (baseRef) envCache.TASK_BASE_REF = baseRef;
+        // (D142) A claim opens a new task window: reset the once-per-window
+        // snapshot-base memoization so the next after_doing re-resolves.
+        snapBaseResolvedDone = false;
+        snapBaseResolved = undefined;
         // (W1497) Merge the server's before_doing hook env over the derived
         // task-record values — the server is the source of truth on
         // collision. HOOK_NAME stays out of the cache: persisting it would
@@ -753,7 +818,12 @@ export const StridePlugin: Plugin = async (input) => {
       }
 
       const strideMd = await readStrideMd();
-      if (!strideMd) return;
+      if (!strideMd) {
+        // (D142) No .stride.md means no ## before_doing section to run, so
+        // capturing the base now IS the post-section capture.
+        if (hookName === "before_doing") await finalizeBeforeDoing();
+        return;
+      }
 
       const commands = parseStrideMd(strideMd, hookName);
       let primarySucceeded = true;
@@ -788,6 +858,13 @@ export const StridePlugin: Plugin = async (input) => {
       // commands.length === 0 is treated as success (primary section was an
       // empty no-op — matches the original behavior at the pre-W793 early
       // return for that branch).
+
+      // (D142) Capture TASK_BASE_REF only now — AFTER the ## before_doing
+      // section ran its `git pull` — so the base is the post-pull branch point.
+      // Runs even when the section failed (the claim already succeeded and a
+      // partially-run section still leaves HEAD more accurate than the pre-pull
+      // value). No-op for every other hook route.
+      if (hookName === "before_doing") await finalizeBeforeDoing();
 
       // (W1638) The after_goal reliability fallback below is keyed off the
       // claim-cached TASK_ID. Resolve it HERE, before the after_review cleanup
