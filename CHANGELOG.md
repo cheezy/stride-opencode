@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.28.0] - 2026-07-16
 
 ### Added — every documented create payload carries a top-level `agent_name` (W1692)
 
@@ -29,7 +29,7 @@ Fully backward compatible, and safe to ship ahead of the server. Documentation/s
 
 ### Source
 
-W1692 — mirrors the canonical `stride` plugin's W1684 (`stride` v1.37.0), and the `stride-codex` (v1.25.0), `stride-copilot` (v2.26.0), and `stride-gemini` (v1.36.0) ports. Kanban D137 ships the server half. No release is cut here: W1693 owns the `package.json` version bump, tag, and GitHub release.
+W1692 — mirrors the canonical `stride` plugin's W1684 (`stride` v1.37.0), and the `stride-codex` (v1.25.0), `stride-copilot` (v2.26.0), and `stride-gemini` (v1.36.0) ports. Kanban D137 ships the server half. Released by W1693 as `stride-opencode` v1.28.0 (tag + GitHub release on this repo only — this plugin has no marketplace; installs resolve via a github ref pin).
 
 ## [1.27.0] - 2026-07-14
 
