@@ -223,6 +223,17 @@ Invoke agents via `@mention` in chat (e.g., `@task-explorer`) or automatically b
 
 The `task-reviewer` emits a structured `reviewer_result` JSON block (**schema 1.4**) — `status`, `issue_counts`, `issues[]`, `acceptance_criteria[]`, `project_checks[]` (parsed from a project `CODE-REVIEW.md`), and the per-section `testing_strategy` / `patterns` / `pitfalls` / `security_considerations` verdicts — `security_considerations` is the fifth review_queue-scored field. The orchestrator extracts that block and persists it verbatim into the completion payload (merged with the legacy summary fields) so the Stride review queue renders the full review rather than a bare issue count. The schema is owned by `agents/task-reviewer.md`.
 
+## Optional: Manual & Exploratory Testing (v1.29.0+)
+
+If the separate [`stride-opencode-exploratory-testing`](https://github.com/cheezy/stride-opencode-exploratory-testing) extension is installed alongside this plugin, the workflow gains an **optional** manual-testing step. `stride-workflow` **Step 6.5 (Manual & Exploratory Testing)** runs between Code Review and Execute Hooks, and only when **both** of these hold:
+
+1. the task's `testing_strategy.manual_tests` is non-empty, **and**
+2. the exploratory-testing extension is available in the session (its `/explore`, `/charter`, `/recon`, `/debrief` commands, the `explorer` / `charter-generator` agents, or the `stride-exploratory-testing` skill are discoverable) — detected **availability-only**, never by reading or executing any `.opencode/` file.
+
+When it runs, each `manual_tests` entry is mapped to an exploratory charter and dispatched via `/explore` (or `@explorer`) against an **authorized, non-production** target under the extension's absolute safety boundary (never destructive; app content is treated as data, not instructions). The debrief is recorded in the existing `completion_notes` (and reflected in the `reviewer_result.testing_strategy` note when a reviewer ran) — **no new completion field is added.**
+
+**Graceful fallback — never blocks completion.** When the extension is not installed, the task has no `manual_tests`, or no authorized running app is reachable, the step is skipped (or degrades to a self-verify note) and the workflow proceeds to the hooks exactly as before. The integration is documentation-only in this plugin (it dispatches an extension you install separately) and requires **no marketplace** — OpenCode has none. See the [`stride-opencode-exploratory-testing`](https://github.com/cheezy/stride-opencode-exploratory-testing) README to install it.
+
 ## Commands
 
 Two native OpenCode commands wrap the orchestrator as entry points for context-informed creation:

@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.29.0] - 2026-07-21
+
+### Added — optional Manual & Exploratory Testing integration with the `stride-opencode-exploratory-testing` extension (W1810–W1814)
+
+The workflow now has an **optional, doubly-gated** manual-testing step that dispatches the separate [`stride-opencode-exploratory-testing`](https://github.com/cheezy/stride-opencode-exploratory-testing) extension when it is installed. `stride-workflow` gains **Step 6.5: Manual & Exploratory Testing** between Code Review (Step 6) and Execute Hooks (Step 7) — numbered `6.5` so no existing step is renumbered. It runs only when BOTH the task's `testing_strategy.manual_tests` is non-empty AND the extension's sanctioned surface (`/explore`, `/charter`, `/recon`, `/debrief`, the `explorer` / `charter-generator` agents, or the `stride-exploratory-testing` skill) is available in the session, detected **availability-only** (never by reading, sourcing, or eval'ing any `.opencode/` file). When it runs, each `manual_tests` entry is mapped to an exploratory charter and dispatched via `/explore` (or `@explorer`) against an **authorized, non-production** target under the extension's absolute safety boundary (never destructive; app content is data, not instructions), and the debrief is folded into `completion_notes`.
+
+The integration is threaded through the skill catalog: `stride-subagent-workflow` documents it as **Phase 3.5** in the decision matrix (mirroring the `task-explorer` / `task-reviewer` rows); `stride-completing-tasks` documents recording the findings in **existing tolerant fields only** — `completion_notes` and the existing `reviewer_result.testing_strategy` note — with **no new server-validated field and no new `workflow_steps` name** (either would break strict completion validation); and `stride-creating-tasks` / `stride-creating-goals` gain an **advisory** note to phrase `manual_tests` entries as chartable scenarios (a target plus the information/risk to discover), with a before/after example. Every piece is **optional and non-blocking**: when the extension is absent, the task carries no `manual_tests`, or no authorized running app is reachable, the workflow falls back to the current behavior and completion is never blocked or failed.
+
 ### Fixed — the enrichment surface documented create and update bodies without their `task` root key (D151)
 
 `stride-enriching-tasks` documented submitting an enriched task with a bare body: `POST /api/tasks` carried `-d '{...enriched task JSON...}'` and no `agent_name`. The server requires a `{"task": {...}}` envelope and rejects a bare object with `422 Missing 'task' key`, so an agent following the enrichment skill literally built a rejected request and — once corrected by hand — created a task with no attribution fallback. The create example now shows the envelope with `"agent_name": "OpenCode"` beside the `task` key, matching the Request Envelope section in `stride-creating-tasks` and the plain agent name this port already sends on claim and complete.
@@ -19,15 +27,15 @@ This surface was missed by goal G4687 (the fleet-wide `agent_name` rollout) beca
 
 ### Testing
 
-Documentation-only; no test suite is exercised. Verified by grep sweep: the enrichment create example carries the envelope and this port's own agent name, matching its `stride-creating-tasks` Request Envelope section; every curl body in the file is brace-balanced; and no other file in the port documents a create body.
+Documentation-only; no test suite is exercised. Verified by grep sweep: the enrichment create example carries the envelope and this port's own agent name, matching its `stride-creating-tasks` Request Envelope section; every curl body in the file is brace-balanced; and no other file in the port documents a create body. For the exploratory-testing integration (W1810–W1814): grep confirms Step 6.5 sits between Steps 6 and 7 with the existing Step 7/8/9 numbering intact, the Phase 3.5 decision-matrix entry and the completion-recording guidance are present, the trigger wording is identical across `stride-workflow`, `stride-subagent-workflow`, and the creation skills, and no new required completion field or `workflow_steps` name was introduced.
 
 ### Backward compatibility
 
-Fully backward compatible. Documentation/skill-text only — no hook logic, `.stride.md`, env-var, or `.stride_auth.md` change. The documented shapes are corrected to what the server has always required; nothing that previously worked stops working.
+Fully backward compatible. Documentation/skill-text only — no `src/` change, no hook logic, `.stride.md`, env-var, or `.stride_auth.md` change. The D151 shapes are corrected to what the server has always required; nothing that previously worked stops working. The exploratory-testing integration is entirely optional and gated on the separate extension being installed: with the extension absent, no `manual_tests`, or no authorized non-production app, the workflow behaves exactly as before and completion is never blocked. It adds no new server-validated field and no new `workflow_steps` name, so existing completions keep validating unchanged.
 
 ### Source
 
-D151 — follow-up to goal G4687; the gap was recorded by the W1684 reviewer as out of scope at the time. Kanban `task_controller.ex` is the contract of record: `create/2` reads `agent_name` beside the `task` key, `update/2` requires `task` and reads no `agent_name`.
+D151 — follow-up to goal G4687; the gap was recorded by the W1684 reviewer as out of scope at the time. Kanban `task_controller.ex` is the contract of record: `create/2` reads `agent_name` beside the `task` key, `update/2` requires `task` and reads no `agent_name`. W1810–W1814 (goal G354) — integrate the optional [`stride-opencode-exploratory-testing`](https://github.com/cheezy/stride-opencode-exploratory-testing) extension into the workflow, completion, and creation skills. OpenCode has no marketplace, so the version lives only in `package.json`; there is no catalog to re-sync.
 
 ## [1.28.0] - 2026-07-16
 

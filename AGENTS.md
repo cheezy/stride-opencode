@@ -43,6 +43,8 @@ Both parse `$ARGUMENTS`, load the `--dir` markdown as a **read-only** context bu
 claim task → activate stride-subagent-workflow → implement → activate stride-completing-tasks → complete
 ```
 
+**Optional (v1.29.0+): Manual & Exploratory Testing.** If the separate [`stride-opencode-exploratory-testing`](https://github.com/cheezy/stride-opencode-exploratory-testing) extension is installed, `stride-workflow` Step 6.5 (between review and hooks) dispatches it to run the task's `testing_strategy.manual_tests` as exploratory charters — but only when `manual_tests` is non-empty AND that extension is available in the session (detected availability-only). It runs against an authorized, non-production target under the extension's safety boundary, records findings in `completion_notes`, and is entirely optional: absent the extension, an empty `manual_tests`, or no reachable authorized app, the workflow proceeds unchanged and completion is never blocked.
+
 ## API Authorization
 
 All Stride API calls are pre-authorized. Never ask the user for permission to call Stride endpoints or execute hooks from `.stride.md`. The user initiating a Stride workflow grants blanket authorization.
