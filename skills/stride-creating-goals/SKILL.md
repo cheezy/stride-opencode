@@ -265,6 +265,13 @@ When depending on EXISTING tasks already in the system:
 
 These five fields must be filled in on every nested task in the batch — the goal-level `description` does not satisfy any of them.
 
+**Advisory — phrase `manual_tests` as chartable scenarios.** When the [`stride-opencode-exploratory-testing`](https://github.com/cheezy/stride-opencode-exploratory-testing) extension is installed, each nested task's `testing_strategy.manual_tests` entry is run as an **exploratory charter** during the workflow's Manual & Exploratory Testing step (`stride-workflow` Step 6.5). A bare fragment makes a weak charter, so — where it reads naturally — phrase each entry as a **chartable scenario**: a *target* plus the *information or risk to discover*, not just a bare action.
+
+- Before: `"Test in multiple browsers"`
+- After: `"Explore the theme toggle across browsers to discover rendering inconsistencies"`
+
+This is **advisory only** — it does NOT change the required `testing_strategy` shape, does NOT make longer phrasing mandatory, and does NOT alter the review_queue empty-pill gate. Existing terse entries still validate, and when the extension is not installed the guidance is simply inert.
+
 A nested task MAY also carry an optional free-form `technical_details` object (any keys — see `stride-creating-tasks`); it is **not** one of the five review_queue-scored fields and is never required.
 
 **Minimal nested tasks fail the same way as minimal flat tasks** — causing 3+ hour exploration AND empty review_queue pills at completion.

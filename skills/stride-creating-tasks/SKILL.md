@@ -129,6 +129,13 @@ Use BEFORE calling `POST /api/tasks` to create any Stride task or defect.
 - ✅ `"unit_tests": ["Test auth flow", "Test error handling"]`
 - ❌ `"unit_tests": "Run unit tests"` (will fail)
 
+**Advisory — phrase `manual_tests` as chartable scenarios.** When the [`stride-opencode-exploratory-testing`](https://github.com/cheezy/stride-opencode-exploratory-testing) extension is installed, each `testing_strategy.manual_tests` entry is run as an **exploratory charter** during the workflow's Manual & Exploratory Testing step (`stride-workflow` Step 6.5). A bare fragment makes a weak charter, so — where it reads naturally — phrase each entry as a **chartable scenario**: a *target* plus the *information or risk to discover*, not just a bare action.
+
+- Before: `"Test in multiple browsers"`
+- After: `"Explore the theme toggle across browsers to discover rendering inconsistencies"`
+
+This is **advisory only** — it does NOT change the required `testing_strategy` shape, does NOT make longer phrasing mandatory, and does NOT alter the review_queue empty-pill gate. Existing terse entries still validate, and when the extension is not installed the guidance is simply inert.
+
 ### security_considerations array
 **MUST be an array of strings, not a single string or object:**
 - ✅ `"security_considerations": ["Validate and sanitize the uploaded filename to prevent path traversal", "Authorize the requesting user owns the board before mutating"]`
