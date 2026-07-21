@@ -438,6 +438,19 @@ saved separately as `review_report`.
 
 **Optional (back-compat only):** On Stride server v1.16.0+, the plugin PUTs `.stride-changed-files.json` to the server during the `/complete` call (with a `before_review`-phase self-heal retry), so the agent does NOT need to send `changed_files` in the body. For older Stride deployments, the body still accepts `changed_files` — see the [Per-File Diff Capture (Optional)](#per-file-diff-capture-optional) section below for the legacy inline-cat pattern that targets those servers. The encoding rules (500-line truncation marker, binary placeholder, `{path, diff}` shape) live in `docs/diff-contract.md` and should not be duplicated into the example.
 
+## Recording Manual & Exploratory Testing Findings (Optional)
+
+When the **Manual & Exploratory Testing** step ran — `stride-workflow` Step 6.5 / `stride-subagent-workflow` Phase 3.5 dispatched the `stride-opencode-exploratory-testing` extension because the task carried `manual_tests` and the extension was available — record its findings in **existing completion fields only**. There is **no new server-validated field and no new `workflow_steps` name** for manual testing; introducing either would break strict completion validation (a 422).
+
+**Where the findings go (both are tolerant, free-text existing fields):**
+
+1. **`completion_notes`** — always the primary carrier. Append a short manual-testing summary: which charters ran, the Explored / Found / Unknown highlights, and the count/severity of any bugs found (or "no issues found"). This is plain free text the server already accepts; keep it concise.
+2. **`reviewer_result.testing_strategy.note`** — **only when a `task-reviewer` ran** (medium+ / 2+ key_files). Reflect the exploratory outcome in the existing `testing_strategy` verdict note (e.g. "…manual tests also exercised via /explore: 1 High bug found, filed in completion_notes"). This is the *existing* tolerant note string inside the reviewer's structured block — do **not** add a sibling key. When the reviewer was **skipped** (small task, 0-1 key_files), `completion_notes` is the **sole** carrier — the self-reported `reviewer_result` skip form gains nothing extra.
+
+**Fallback — plugin not used → nothing extra recorded.** When the extension was absent, or the task had no `manual_tests`, or the step degraded to plan-only, the completion payload is **exactly as it is today** — no manual-testing sentence is required in `completion_notes`, and every field keeps its normal shape. The recording above is purely additive to fields that are already free text; it never changes the required-field set or the payload shape.
+
+**Redaction (mandatory).** Never write real credentials, tokens, private data, or internal hostnames from an exploratory session into `completion_notes` or the `testing_strategy` note — summarize findings with synthetic placeholders, exactly as the extension's own debrief does.
+
 ## Per-File Diff Capture (Optional)
 
 The completion payload accepts an optional top-level `changed_files` array — one
