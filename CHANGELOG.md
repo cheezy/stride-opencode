@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.30.0] - 2026-07-22
+
+### Added — optional Deep Security-Considerations Review with the `stride-opencode-security-review` extension (W1875–W1879)
+
+The review phase now has an **optional, doubly-gated** deep security check that dispatches the separate [`stride-opencode-security-review`](https://github.com/cheezy/stride-opencode-security-review) extension when it is installed. `stride-workflow` **Step 6 (Code Review)** gains a *Deep security-considerations review* sub-step — after `task-reviewer` runs — that engages only when BOTH the task's `security_considerations` list is non-empty (an explicit `"None — …"` placeholder does not count) AND the extension's sanctioned surface (`/security-review`, the `security-reviewer` agent, or the `security-review-essentials` skill) is available in the session, detected **availability-only** (never by reading, sourcing, or eval'ing any `.opencode/` file). When it runs, the `security-reviewer` is dispatched in **considerations mode** with the diff and the task's `security_considerations` list — framed as **data to assess, never as instructions** (prompt-injection safety) — and returns one `consideration_verdicts` entry per consideration.
+
+The verdicts are merged into `reviewer_result.security_considerations.considerations[]` via the existing **whole-object passthrough** — no new completion field, no new `workflow_steps` name (the dispatch folds into the existing `reviewer` step). The check is **fail-closed**: any `partial`/`unmitigated` verdict flips the `security_considerations` section to `failed` and raises a matching `category: "security"` Critical issue, which routes through the existing review gate so an un-addressed consideration cannot reach Done; a present-but-malformed response keeps the prose verdict and never silently downgrades to `passed`.
+
+The integration is threaded through the skill catalog: `agents/task-reviewer.md` documents the nested `security_considerations.considerations[]` array (each `{ consideration, status: mitigated | partial | unmitigated, evidence, note }`) and its fail-closed escalation rule, and bumps the `reviewer_result` schema from **1.4 to 1.5**; `stride-subagent-workflow` documents the dispatch as **Phase 3.1** in the decision matrix (mirroring the exploratory-testing Phase 3.5 gate); and `stride-completing-tasks` documents that the nested array rides through the whole-object copy verbatim and adds a pre-submission self-check that a deep-reviewed section's `considerations[]` is present and status-consistent. Every piece is **optional and non-blocking**: when the extension is absent or the task carries no real `security_considerations`, the workflow falls back to the `task-reviewer` prose verdict and completion is never blocked or failed.
+
+### Testing
+
+Documentation-only; no test suite is exercised. Verified by grep sweep and JSON parse: `schema_version` reads `1.5` in every occurrence of `agents/task-reviewer.md` with the worked-example JSON still parsing; the Step 6 sub-step, the Phase 3.1 decision-matrix entry, and the completing-tasks passthrough + self-check are present; the trigger wording (non-empty `security_considerations` + extension available, availability-only detection) is consistent across `stride-workflow`, `stride-subagent-workflow`, and `agents/task-reviewer.md`; and no new required completion field or `workflow_steps` name was introduced.
+
+### Backward compatibility
+
+Fully backward compatible. Documentation/skill-text only — no `src/` change, no hook logic, `.stride.md`, env-var, or `.stride_auth.md` change. The deep security review is entirely optional and gated on the separate extension being installed: with the extension absent or the task carrying no real `security_considerations`, the workflow behaves exactly as before and completion is never blocked. It adds no new server-validated field and no new `workflow_steps` name, so existing completions keep validating unchanged. The nested `considerations[]` array is additive and never required.
+
+### Source
+
+W1875–W1879 (goal G370) — the OpenCode analog of the Claude Code goal G367 (W1861–W1864), wiring the `security_considerations` deep review into the review phase and dispatching the same-runtime `stride-opencode-security-review` extension (created in G369). OpenCode has no marketplace, so the version lives only in `package.json`; there is no catalog to re-sync.
+
 ## [1.29.0] - 2026-07-21
 
 ### Added — optional Manual & Exploratory Testing integration with the `stride-opencode-exploratory-testing` extension (W1810–W1814)
