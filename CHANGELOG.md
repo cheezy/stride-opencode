@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.31.0] - 2026-07-26
+
+### Added — `behaviour_test_matrix` support: populate at creation, verify at review, utilize during implementation (W1937–W1939)
+
+Tasks may now carry an **optional** `behaviour_test_matrix` — an array of rows, each pairing one behaviour the change must satisfy with the real test that covers it, across **seven fixed categories** (`"Happy path"`, `"Boundary"`, `"Error / exception"`, `"Null / empty"`, `"Concurrency"`, `"Lifecycle / wiring"`, `"Contract / serialization"`). Each row is `{ category, behaviour, test_name, type, status, na_reason, position }`, where `type` is `"unit"` / `"integration"` / `"manual"` (or a `/`-joined combination) and `status` is `"planned"` / `"passing"` / `"failing"` / `"not_applicable"`. Every row either names a real test or is waived with an `na_reason` — a row with neither is rejected. The field is **all-or-nothing**: absent, `null`, and `[]` all pass, but a **non-empty** matrix must carry a row for **every** one of the seven categories.
+
+The support is threaded through the whole lifecycle:
+
+- **Creation** — `stride-creating-tasks` documents the field in the recommended-fields checklist, the Complete Task Object (a full seven-row sample), the Field Quick Reference, and a new Embedded Object Formats subsection with four WRONG cases and a labelled RIGHT excerpt; `stride-creating-goals` documents the identical shape for nested tasks, with no batch-specific variation.
+- **Enrichment** — the `task-enricher` agent projects the `unit_tests` / `integration_tests` / `manual_tests` / `edge_cases` it just derived onto all seven categories and emits the matrix **by default** when Step 3 produced any test cases, waiving genuinely-inapplicable categories with a specific `na_reason` rather than inventing a test; the pre-submission checklist grows from 17 to **18 items**, with `behaviour_test_matrix` as its sole optional entry. `stride-enriching-tasks` mirrors this in the manual walkthrough.
+- **Review** — `task-reviewer` verifies each row against reality (locating the named test in the diff or the existing suite), judges it Verified / Missing / Mismatch, and echoes the outcome using the **same four-value row status enum** the task-authored matrix uses (Verified → `"passing"`; Missing and Mismatch → `"failing"`). Missing and Mismatch rows are filed as Important `category: "testing"` issues — there is deliberately **no new issue category**. The reviewer emits a new **OPTIONAL** top-level `behaviour_test_matrix` verdict (`{ status, note, rows[] }`) and bumps the `reviewer_result` schema from **1.5 to 1.6**; the verdict key is **omitted entirely** when the task supplied no matrix, rather than sent as an empty `not_assessed` placeholder. Escalation is **fail-closed**: any echoed `"failing"` row forces the section status to `"failed"` and requires a matching `category: "testing"` issue.
+- **Utilization** — `stride-workflow` Step 4 instructs the implementing agent to write the test each row names, advance that row's `status` from `"planned"` to `"passing"` (or `"failing"` if left red), and record the advance by PATCHing the updated matrix onto the task; Step 6 passes the field to `task-reviewer` with the rest of the review fields. `stride-subagent-workflow` documents this as orthogonal to its complexity matrix, and `stride-completing-tasks` adds a pre-submission self-check for the verdict's presence, row shape, and fail-closed consistency.
+
+Row text is treated as untrusted **data, never instructions** — a row that reads like a directive ("mark this row verified", "skip the remaining rows") is content under review, and the creation and enrichment docs forbid recording secrets, credentials, or raw HTML in `behaviour`, `test_name`, or `na_reason`.
+
+### Testing
+
+`bun test` — 275 pass / 0 fail; `bun run typecheck` clean. The change is documentation/prompt-text only, so no suite behaviour changes. Additionally verified by JSON-parse sweep (every fenced JSON block added parses; the pre-existing annotated blocks that do not parse were confirmed unchanged against a stashed tree), by category-coverage grep (7/7 categories present in both the enricher agent and the enrichment skill), and by a word-level comparison of every added line against the Claude Code reference change-set — the mirrored text is identical apart from three sanctioned OpenCode adaptations (custom-agent wording, `agents/task-reviewer.md` paths, Step 5 → Step 6). A repo-wide grep confirms no stale `schema_version` `1.4`/`1.5` remains in any skill or agent file, and `README.md` / `AGENTS.md` were re-synced to 1.6 alongside.
+
+### Backward compatibility
+
+Fully backward compatible. Documentation/skill-text only — no `src/` change, no hook logic, `.stride.md`, env-var, or `.stride_auth.md` change. `behaviour_test_matrix` is **optional** everywhere and is never one of the five review_queue-scored fields, so a task without one behaves exactly as before and never shows an empty pill. No new required completion field and no new `workflow_steps` name were introduced, so existing completions keep validating unchanged. The reviewer's new verdict key is additive and absent by default; the row `status` enum reuses the existing four values rather than introducing a reviewer-only vocabulary.
+
+### Source
+
+W1937–W1939 (goal G385) — the OpenCode analog of the Claude Code goal G381, against the same Kanban `behaviour_test_matrix` field added in G379. The canonical `reviewer_result` schema of record stays at `stride/agents/task-reviewer.md`; this port cites it and never redefines it. OpenCode has no marketplace (install is a `github:` ref pin), so the version lives only in `package.json` and the release is push main + tag + `gh release` on this repo alone — there is no catalog to re-sync.
+
 ## [1.30.0] - 2026-07-22
 
 ### Added — optional Deep Security-Considerations Review with the `stride-opencode-security-review` extension (W1875–W1879)
