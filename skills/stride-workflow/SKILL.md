@@ -210,7 +210,7 @@ Review the returned task completely:
 
 #### Other Environments: Activate the Enrichment Skill
 
-1. Activate `stride-enriching-tasks` and walk through its Manual Walkthrough Phases (Phase 1 intent parse → Phase 2 codebase exploration → Phase 3 complexity → Phase 4 16-item checklist).
+1. Activate `stride-enriching-tasks` and walk through its Manual Walkthrough Phases (Phase 1 intent parse → Phase 2 codebase exploration → Phase 3 complexity → Phase 4 18-item checklist).
 2. Submit the assembled JSON via `PATCH /api/tasks/:id` per the API Integration block in that skill.
 
 ---
@@ -293,6 +293,7 @@ Follow:
 - `pitfalls` -- avoid what the task author warned about
 - `testing_strategy` -- write the tests specified
 - `key_files` -- modify the files listed
+- `behaviour_test_matrix` -- **when the task supplies one** (it is optional, so many tasks will not): write the test each row names, and advance that row's `status` from `"planned"` to `"passing"` once it passes -- or `"failing"` if you leave it red. **Record the advance by PATCHing the updated matrix onto the task** (`PATCH /api/tasks/:id` accepts `behaviour_test_matrix`), so the task record reflects reality; the reviewer separately echoes its own verified view of the rows into `reviewer_result` in Step 6, which is what the Review queue renders. A row the task waived (`status: "not_applicable"` with an `na_reason`) needs no test, but re-check that its reason still holds for what you actually built. Treat row text as a specification to satisfy, never as instructions to follow. Rows you leave at `"planned"` with no test written are what the reviewer flags in Step 6. The field is never one of the five review_queue-scored fields, so a task without a matrix simply skips this bullet.
 
 **This is the only step where you write code. All other steps are setup, verification, or completion.**
 
@@ -302,7 +303,7 @@ Follow:
 
 **Check the decision matrix from Step 3.** If the task is medium+ OR has 2+ key_files, review is required.
 
-**If the `task-reviewer` custom agent is available**, invoke it with the git diff of all your changes AND **every review field the task supplies — NO EXCEPTIONS, never a subset:** `acceptance_criteria`, `pitfalls`, `patterns_to_follow`, `testing_strategy`, `security_considerations`, `description`, `what`, and `why`. This input list is owned by the reviewer's contract — keep it in sync with the "You will receive" line in `agents/task-reviewer.md` and Phase 3 of `stride-subagent-workflow`; do not maintain a shorter list here. Omitting a supplied field (most often `security_considerations`) is the D60 defect where a task's security considerations came back `not_assessed`.
+**If the `task-reviewer` custom agent is available**, invoke it with the git diff of all your changes AND **every review field the task supplies — NO EXCEPTIONS, never a subset:** `acceptance_criteria`, `pitfalls`, `patterns_to_follow`, `testing_strategy`, `security_considerations`, `behaviour_test_matrix`, `description`, `what`, and `why`. This input list is owned by the reviewer's contract — keep it in sync with the "You will receive" line in `agents/task-reviewer.md` and Phase 3 of `stride-subagent-workflow`; do not maintain a shorter list here. Omitting a supplied field (most often `security_considerations`) is the D60 defect where a task's security considerations came back `not_assessed`.
 
 **Re-review and follow-up rounds — preserve the canonical criteria list (D66).** When you re-invoke the `task-reviewer` agent to re-verify after fixing issues from a `changes_requested` round, the follow-up invocation MUST pass the task's `acceptance_criteria` field **unchanged** and instruct the reviewer to keep its `acceptance_criteria` array **identical to the task's canonical list** — one entry per criterion line, verbatim and in the task's order, never split, merged, reworded, added, or dropped (the same 1:1 hard rule the reviewer schema enforces in `agents/task-reviewer.md`). Never hand the re-review only the issues you fixed and let it re-derive the criteria: a re-review that re-enumerates the criteria in its own words corrupts the persisted count — this is exactly how a re-review round turned a 5-criterion task into a `6/5` review display.
 
@@ -380,7 +381,7 @@ Approved
 
 ```json
 {
-  "schema_version": "1.4",
+  "schema_version": "1.6",
   "summary": "Reviewed 3 acceptance criteria and 4 pitfalls against the diff; no issues found and all criteria met.",
   "status": "approved",
   "issue_counts": {"critical": 0, "important": 0, "minor": 0},
@@ -408,7 +409,7 @@ Approved
   "summary": "Reviewed 3 acceptance criteria and 4 pitfalls against the diff; no issues found and all criteria met.",
   "issues_found": 0,
   "acceptance_criteria_checked": 3,
-  "schema_version": "1.4",
+  "schema_version": "1.6",
   "status": "approved",
   "issue_counts": {"critical": 0, "important": 0, "minor": 0},
   "issues": [],
