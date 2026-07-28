@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.32.1] - 2026-07-28
+
+### Added — an explicit intentionally-blank Step 5 placeholder in the workflow skill (W1942)
+
+`skills/stride-workflow/SKILL.md` jumped straight from **Step 4: Implementation** to **Step 6: Code Review** with no Step 5 heading and no note, so the gap read as a lost section. That made this port's numbering look broken to anyone auditing it — and, worse, made its **correct** Step 6 citations read as off-by-one bugs, since the sibling Claude Code and Gemini ports number Code Review as Step 5.
+
+The slot has been empty since **v1.7.0**, which removed the Step 5 "Activate Development Guidelines" section because it activated the project-author-private `stride-development-guidelines` skill that is not distributed with this plugin. That release deliberately left the number empty rather than renumbering Steps 6–9, to keep the file's many cross-references stable — but it recorded the reasoning only in the changelog, where a reader of the skill never sees it.
+
+v1.7.0 removed **three** things — the Step 5 section, its flowchart node, and its Quick Reference Card line — so the gap was visible in three places. All three are restored here, mirroring the treatment the `stride-codex` port (which shares this numbering) already has:
+
+- **The heading sequence** gains `## Step 5: (intentionally left blank)` with a one-line rationale naming v1.7.0, why the slot is preserved, and "proceed directly from Step 4 to Step 6".
+- **The Complete Workflow Flowchart** gains a `(STEP 5 intentionally removed in v1.7.0 -- slot preserved, Steps 6-9 not renumbered)` node between STEP 4 and STEP 6.
+- **The Quick Reference Card** gains a `5. (removed in v1.7.0 -- slot preserved to keep Step 6-9 numbers stable)` line.
+
+The flowchart and the card matter more than the heading list for this defect, because both are self-contained representations of the sequence that a reader scans *instead of* the headings — a placeholder only in the heading chain would have left the two most-scanned surfaces still reading as a lost section.
+
+The port's fractional `Step 6.5` already carried its own numbering note; it now also names Step 5, so a reader who meets that note first learns there is a second, deliberate numbering anomaly.
+
+**No step was renumbered and no cross-reference changed.** The diff is purely additive — four added lines and zero deletions in the flowchart/card/heading surfaces, plus one extended sentence in the Step 6.5 note.
+
+### Backward compatibility
+
+Fully backward compatible. Documentation-only — no hook logic, credential path, wire shape, or behaviour changes, and every existing Step 6 citation in this port remains correct exactly as written.
+
+### Source
+
+W1942, part of goal G386, which reconciles step-reference and release-record drift across the Stride fleet. `stride-codex/skills/stride-workflow/SKILL.md` is the treatment of record. Ends at the tag and GitHub release on this repo — **stride-opencode has no marketplace catalog**; installs resolve through a direct GitHub reference.
+
+**Known, not fixed here:** the `[1.32.0]` entry above cites "the Step 5 self-review checklist" for a checklist that lives in **Step 6** of this port — a sibling-port number (the Claude Code and Gemini ports number Code Review as Step 5) written into this port's record, and a live example of exactly the confusion this release exists to prevent. It is left as written because that release is already tagged and published, and historical entries are recorded rather than rewritten.
+
 ## [1.32.0] - 2026-07-28
 
 ### Changed — the `behaviour_test_matrix` rules treat row text as untrusted, and say what to do when it carries a credential
