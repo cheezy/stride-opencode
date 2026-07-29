@@ -27,3 +27,4 @@ bun.lock
 .stride-changed-files.json
 .stride-diff-upload-state
 .stride-env-cache
+.stride_auth.md
