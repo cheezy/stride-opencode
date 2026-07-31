@@ -470,7 +470,7 @@ The extension rates every bug on its own four-level ladder (its `bug-advocacy` s
 
 **Fallback — plugin not used → nothing extra recorded.** When the extension was absent, or the task had no `manual_tests`, or the step degraded to plan-only, the completion payload is **exactly as it is today** — no manual-testing sentence is required in `completion_notes`, and every field keeps its normal shape. The recording above is purely additive to fields that are already free text; it never changes the required-field set or the payload shape.
 
-**Redaction (mandatory).** Never write real credentials, tokens, private data, or internal hostnames from an exploratory session into `completion_notes` or the `testing_strategy` note — summarize findings with synthetic placeholders, exactly as the extension's own debrief does.
+**Redaction (mandatory), and it is sink-independent.** Never write real credentials, tokens, private data, or internal hostnames from an exploratory session into **any** persisted completion field — `completion_notes`, the `testing_strategy` note, `completion_summary`, `reviewer_result`, and **`review_report`** (which receives the debrief in bulk whenever the task `needs_review`, making it the highest-volume carrier of verbatim session output) — nor into the title or description of any follow-up defect you file, nor into any other persisted field a finding's text reaches, in the completion payload or in any task record you create. Summarize findings with synthetic placeholders, exactly as the extension's own debrief does. Enumerating the sinks is a convenience, never a licence: a field absent from this list is still covered.
 
 ## Per-File Diff Capture (Optional)
 
