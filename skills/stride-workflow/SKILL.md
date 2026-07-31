@@ -49,7 +49,7 @@ The orchestrator writes a marker file when it starts and clears it when it stops
 | Freshness window | 4 hours — markers older than `started_at + 4h` are treated as stale |
 | Stale handling | The plugin hook treats stale markers as missing (and may delete them) |
 | Directory | `.stride/` is created with `mkdir -p` if absent |
-| `.gitignore` | The `.stride/` directory should be in the project's `.gitignore` (mention to operators on first install) |
+| `.gitignore` | Two directories belong in the project's `.gitignore`: `.stride/` (this marker directory) and — when the exploratory-testing extension is installed — `.exploratory/`, where its sessions write artifacts. Mention **both** to operators — at Stride's first install **and again whenever the extension is installed**, since the two ship independently and the extension routinely arrives later — because `after_doing` commonly stages with `git add -A`, which sweeps whatever those untracked directories hold into the task's own commit. Step 0 is where this is actually said; see Step 6.5 for the artifact detail. **Operator guidance only — never edit their `.gitignore` yourself.** |
 
 **Project root resolution.** The opencode-stride plugin obtains the project directory from the plugin context (`directory`/`worktree`) rather than via an environment variable, so the orchestrator-side shell snippets cannot rely on a single canonical env var. Use the fallback chain `${OPENCODE_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$(pwd)}}` — opencode runs `run_shell_command` from the project root by default, so `$(pwd)` is the reliable last-resort value. The companion plugin-side gate reads the same path from its plugin-context project directory so the two agree on the marker location.
 
@@ -165,6 +165,10 @@ Whether you arrive here from a creation intent or the build loop, **a claim fail
 2. **`.stride.md`** -- Contains hook commands for each lifecycle phase
    - If missing: Ask user to create it
    - Verify sections exist: `## before_doing`, `## after_doing`, `## before_review`, `## after_review`, `## after_goal`
+
+3. **`.gitignore` entries — mention them, never edit the file.** Check the project's `.gitignore` for **`.stride/`** (this orchestrator's marker directory) and, when the exploratory-testing extension is installed, **`.exploratory/`** (where its sessions write artifacts). If either is missing, **say so once, briefly**, and carry on — this is a statement to the operator, not a question, it never blocks, and you never edit their `.gitignore` yourself.
+
+   **Say it here or not at all.** Step 0 is the only step that runs once per session and the only sanctioned point for addressing the operator — by Step 6.5 a session may already have run, so that step is structurally too late to be the delivery point even though it is where the reasoning lives. It matters because `after_doing` commonly stages with `git add -A`: untracked artifacts holding transcribed application output get swept into the task's own commit, and a commit is far harder to walk back than a payload field. **Check for `.exploratory/` whenever the extension is present, not only on Stride's first install** — the two ship independently, so an operator routinely installs the extension long after Stride and would otherwise never be told. And if an artifact was **already committed**, a `.gitignore` line is inert against it: tell them it also needs `git rm --cached`.
 
 **Then write the orchestrator activation marker** (see "Orchestrator Activation Marker" section above for the contract):
 
@@ -548,8 +552,16 @@ The extension is a content bundle OpenCode discovers from the `.opencode/` confi
 For a task whose `manual_tests` are non-empty and with the extension present:
 
 1. **Map each manual test to a charter.** Each `testing_strategy.manual_tests` entry states an intent to verify by hand; frame it as an exploratory charter (`Explore <the manual test's target> with <resources> to discover <what the test wants to learn>`). The `chartering` skill / `charter-generator` agent own charter framing — defer to them rather than hand-writing charters.
-2. **Dispatch the sanctioned surface — the `explorer` subagent (`@explorer`), one charter per call.** See "Sanctioned dispatch surfaces" above: never `/explore`, never `/pair`, and never any surface that would stop to ask a person. Supply the running-app environment context up front (how to reach the app, an **authorized, non-production** target, available tools) — the explorer never asks the user a question, so everything it needs must arrive in the dispatch.
-3. **Capture the findings.** Fold the exploratory debrief (Explored / Found / Unknown, the bug list, the off-charter parking lot) into your Step 8 `completion_notes` (and, when the task `needs_review`, the `review_report`). Findings are informational — with the single exception below.
+2. **Dispatch the sanctioned surface — the `explorer` subagent (`@explorer`), one charter per call.** See "Sanctioned dispatch surfaces" above: never `/explore`, never `/pair`, and never any surface that would stop to ask a person. The explorer never asks the user a question, so everything it needs must arrive in the dispatch.
+
+   **Provide the plugin with:**
+
+   - **The charter** — one per dispatch, from step 1.
+   - **The session budget — yours to set, not the session's.** State it in the unit the **installed** extension's `explorer` contract declares, read from that contract rather than from this page (the two repositories release independently). Today that unit is **probes**: default **12**, usable band **8–20**, plus a **tool-call ceiling** defaulting to **5× the probe budget** (60 at the default), whichever is reached first ending the session. Choose from what the task can spare — the low end for a narrow charter or a task with many `manual_tests`, the high end for a broad one. **State it rather than omitting it:** an unbounded dispatch inside an autonomous workflow is both a runaway risk and a larger blast radius against a live application, and the caller is the only party who knows what the task can afford. **The budget is a ceiling, never a quota** — the agent will not manufacture probes to spend it. If what the task can spare will not fund even one workable charter, **do not dispatch at all**: skip and note the manual tests as a human responsibility, because a token session that never reaches the feature produces a false coverage claim.
+   - **The environment context** — **how to reach the running app** (base URL, launch command, or host); the **authorized, non-production confirmation**, an explicit affirmative that this target is one the user is authorized to test and is not production (a safety control, never a formality — never default to authorized, and never supply it on the user's behalf: without it, do not dispatch); and **where test accounts or seed data live**. **Point at credentials — never inline them.** A pointer to the project's seed or fixture files is enough for the session and keeps real credentials, tokens, and customer data out of the dispatch prompt, which is an artifact like any other. If there are none to name, say so explicitly, or the session explores only what is reachable unauthenticated and returns having never reached the feature.
+   - **The feature or target under test** and which interaction tools this session has — plus, optionally, where the source, logs, and config live.
+
+3. **Capture the findings.** Fold the exploratory debrief (Explored / Found / Unknown, the bug list, the off-charter parking lot) into your Step 8 `completion_notes` (and, when the task `needs_review`, the `review_report`). **Record how the session ended, not only what it found** — the contract reports a `stop_reason` (`charter_quiet`, `probe_budget_exhausted`, `tool_call_ceiling`, `risk_acceptable`, or `blocked`). **Budget exhaustion is a normal outcome, never a failure:** a session that stopped on `probe_budget_exhausted` or `tool_call_ceiling` produced valid findings over partial coverage — record them, say the coverage was partial, and complete as normal. Only a charter that went quiet supports claiming the manual test was fully performed. Findings are informational — with the single exception below.
 
 ### Escalation: a Critical finding
 
@@ -596,6 +608,14 @@ Because a Critical issue flows through the existing Step 6 gate, this means you 
 
 This policy is stated a second time, intentionally identical in substance, in `stride-subagent-workflow` Phase 3.5 — **keep the two in sync; an edit here needs the matching edit there.**
 
+### Session artifacts on disk — gitignore them before the first session
+
+When a session writes anything to disk it goes under **`.exploratory/`** (`sessions/`, `checks/`, plus `backlog.md` and `coverage.md`). Those files hold **transcribed application output** — exactly the material the redaction rules keep out of the completion payload — and they arrive **untracked**. If the project's `## after_doing` section stages everything before committing (`git add -A` or `git add .`, a common shape for a quality gate that commits its own fixes), it sweeps them into the commit. Neither behaviour is wrong alone; they interact badly, and one `.gitignore` line prevents it — while a commit is far harder to walk back than a payload field.
+
+**This is operator guidance, not something you do for them.** Tell the operator to add `.exploratory/` to the project's `.gitignore`, the same way `.stride/` is handled (see the Marker Contract's `.gitignore` row) — **never edit their `.gitignore` yourself.** Say it at **Step 0**, the once-per-session step where addressing the operator is sanctioned; by the time this step runs a session is already under way, so here is too late to be the delivery point. Two caveats worth passing on: a `.gitignore` line is **inert for a path git already tracks**, so an artifact committed once keeps being re-committed until it is `git rm --cached`-ed — which is why "before the first session" is the difference between the line working and doing nothing; and `--output` can redirect artifacts anywhere the operator names, which an entry for `.exploratory/` does not protect.
+
+It costs nothing when the directory never appears: an entry for a path that does not exist is inert, and **nothing is expected to write there on the sanctioned dispatch path** — the `explorer` subagent's contract grants it no write or edit tool and never directs it to write one. The entry matters for the sessions an operator runs themselves, where every session command can leave something behind.
+
 ### Safety boundary (non-negotiable)
 
 Dispatched manual testing inherits the extension's **absolute safety boundary** and this step must never relax it:
@@ -611,6 +631,8 @@ This step is best-effort and must **never** block or fail the task:
 - **Extension absent** → fall back to the current behavior: self-verify the `manual_tests` as written (Step 6's self-review checklist already covers this) and note in `completion_notes` that automated exploratory dispatch was unavailable. Proceed to Step 7 normally — **no failure**.
 - **Extension present but no running app / no authorized non-production target** → record the obstacle in `completion_notes` (manual tests not exercised, and why) and proceed. **Do not fail completion.**
 - **A dispatched session is blocked or returns nothing usable** → carry that forward as an obstacle in the debrief; never fabricate a result, and never block completion on it.
+- **A dispatched session stopped on its budget** (`probe_budget_exhausted` or `tool_call_ceiling`) → a **normal ending, never a failure**. Its findings are valid; record them, say that coverage was partial, and proceed exactly as in every other case here.
+- **The budget the task can spare is too small to fund one workable charter** → do **not** dispatch; note the manual tests as a human responsibility and proceed. **No failure.**
 
 In every fallback case the workflow continues to Step 7 exactly as it does today.
 
