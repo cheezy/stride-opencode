@@ -159,7 +159,7 @@ This gate is **not bypassable** by submitting a self-reported skip (`dispatched:
 ### With Plugin Installed (Automatic Hooks)
 
 1. **Finish your work** - All implementation complete
-2. **Pre-completion code review** - If medium+ complexity OR 2+ key_files, invoke the `task-reviewer` custom agent. Fix Critical/Important issues. Save output as `review_report`.
+2. **Pre-completion code review** - If the `stride-workflow` Step 3 decision matrix says YES in the **Review** column for this task's row, invoke the `task-reviewer` custom agent. **Read the column; do not re-derive the condition here** (D221). Fix Critical/Important issues. Save output as `review_report`.
 3. **Call `PATCH /api/tasks/:id/complete` directly** - Include `after_doing_result` and `before_review_result` with `{"exit_code": 0, "output": "Executed by OpenCode hooks system", "duration_ms": 0}`. The hooks.json system will:
    - `tool.execute.before`: automatically execute `.stride.md` `## after_doing` BEFORE the call runs (blocks if it fails)
    - `tool.execute.after`: automatically execute `.stride.md` `## before_review` AFTER the call succeeds
@@ -171,7 +171,7 @@ This gate is **not bypassable** by submitting a self-reported skip (`dispatched:
 ### Without Plugin (Manual Hooks)
 
 1. **Finish your work** - All implementation complete
-2. **Pre-completion code review** - If medium+ complexity OR 2+ key_files, invoke `task-reviewer`. Save output as `review_report`.
+2. **Pre-completion code review** - If the `stride-workflow` Step 3 decision matrix says YES in the **Review** column for this task's row, invoke `task-reviewer`. Save output as `review_report`.
 3. **Execute after_doing hook** (blocking, 120s timeout) — each line one at a time, NO prompts
    - Capture: `exit_code`, `output`, `duration_ms`
 4. **If after_doing fails:** FIX ISSUES, do NOT proceed
@@ -190,7 +190,7 @@ Work Complete
     ↓
 Check decision matrix for code review (if custom agents available)
     ↓
-Medium+ OR 2+ key_files? ─YES→ Invoke task-reviewer custom agent
+Matrix Review column says YES? ─YES→ Invoke task-reviewer custom agent
     ↓ NO (or no custom agent support)     ↓
     ↓                              Issues found? ─YES→ Fix issues
     ↓                                     ↓ NO            ↓
@@ -453,7 +453,7 @@ When the **Manual & Exploratory Testing** step ran — `stride-workflow` Step 6.
    **Include the stakeholder impact, not just the severity.** Severity says how bad the demonstrated consequence was; **who is harmed and how** is what a reviewer weighing the finding actually needs, and it is what drives triage. The explorer emits it as `bugs[].stakeholder_impact` — the RIMGEA *Externalize* product. Read the field from the contract that is **installed**, not from this page, and where the session supplies it, use it: restated in your own words and redacted. Where an older contract emits no such field, say who is harmed from what the finding shows, or say plainly that the session did not establish it — **never invent one**, and never quietly upgrade "could not establish" into a confident claim.
 
    **Cite the session artifact's path when one was written — and expect that usually none was.** The only surface Step 6.5 may dispatch is the `explorer` subagent, and **its contract grants it no write or edit tool and never directs it to write one**, so the automated path is not expected to produce an artifact. One exists when a **human** separately ran a session command that wrote under `.exploratory/` — `/explore`, `/pair` and `/harden` write session sheets or drafted checks, and `/recon`, `/charter`, `/debrief` and `/nightmare-headline` can append to the backlog or coverage files. Cite a path only when you actually know of such an artifact and it belongs to this task's record; otherwise omit the mention rather than inventing one, and never let a missing artifact read as a missing session. **Record the path, never the contents** — the artifact holds transcribed application output, which is exactly the material redaction keeps out of these fields. **Cite a repository-relative path, never an absolute one**, which would disclose your home directory, username, and machine layout into a persisted, rendered field.
-2. **`reviewer_result.testing_strategy.note`** — **only when a `task-reviewer` ran** (medium+ / 2+ key_files). Reflect the exploratory outcome in the existing `testing_strategy` verdict note, **naming the worst stakeholder impact when there were findings** and, when an artifact exists, its path (e.g. "…manual tests exercised via a dispatched explorer session, stopped on probe budget so coverage is partial: 1 High bug — an in-progress checkout can be lost for a paying customer — filed in completion_notes"). This is the *existing* tolerant note string inside the reviewer's structured block — do **not** add a sibling key. When the reviewer was **skipped** (small task, 0-1 key_files), `completion_notes` is the **sole** carrier — the self-reported `reviewer_result` skip form gains nothing extra.
+2. **`reviewer_result.testing_strategy.note`** — **only when a `task-reviewer` ran** (the matrix's Review column said YES). Reflect the exploratory outcome in the existing `testing_strategy` verdict note, **naming the worst stakeholder impact when there were findings** and, when an artifact exists, its path (e.g. "…manual tests exercised via a dispatched explorer session, stopped on probe budget so coverage is partial: 1 High bug — an in-progress checkout can be lost for a paying customer — filed in completion_notes"). This is the *existing* tolerant note string inside the reviewer's structured block — do **not** add a sibling key. When the reviewer was **skipped** (small task, 0-1 key_files), `completion_notes` is the **sole** carrier — the self-reported `reviewer_result` skip form gains nothing extra.
 
 ### Recording hardened checks (Optional)
 

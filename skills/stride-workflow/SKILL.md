@@ -247,7 +247,7 @@ The `hooks.json` `tool.execute.after` handler automatically executes `.stride.md
 
 ## Step 3: Explore the Codebase (Decision Matrix)
 
-**This step is NOT optional for medium+ tasks. The decision matrix determines what happens.**
+**The decision matrix determines what happens — and where it says YES, the step is not optional.**
 
 ### Decision Matrix
 
@@ -259,6 +259,8 @@ The `hooks.json` `tool.execute.after` handler automatically executes `.stride.md
 | medium (any) | Skip | YES | YES | YES |
 | large (any) | Skip | YES | YES | YES |
 | Defect type | Skip | YES | Skip (unless large) | YES |
+
+**This matrix is the SOLE decision point for the Decompose, Explore, Plan, and Review columns.** Nothing elsewhere in this plugin may state a second, separately-satisfiable condition for any of them; where other prose mentions one of these steps it describes what this matrix already decided and defers to it. **If any prose appears to give an independent trigger, the matrix wins.** That ambiguity was defect D221, and this rule is its fix.
 
 ### Branch A: Goal / Large Undecomposed Task
 
@@ -274,7 +276,7 @@ If the task is a **goal**, has **large complexity without child tasks**, or has 
 
 Skip exploration, planning, and review. Proceed directly to Step 4 (Implementation).
 
-### Branch C: All Other Tasks (medium+, OR 2+ key_files)
+### Branch C: Every Other Row of the Decision Matrix
 
 1. **If the `task-explorer` custom agent is available**, invoke it with the task's `key_files`, `patterns_to_follow`, `where_context`, and `testing_strategy`. Wait for the result. Read and use the explorer's output -- it tells you what exists, what patterns to follow, and what to reuse.
 
@@ -283,7 +285,7 @@ Skip exploration, planning, and review. Proceed directly to Step 4 (Implementati
    - Search for patterns mentioned in `patterns_to_follow`
    - Find related test files
 
-2. **If medium+ OR 3+ key_files OR 3+ acceptance criteria lines:** Outline your implementation approach using the exploration output, `acceptance_criteria`, `testing_strategy`, `pitfalls`, and `verification_steps`. Follow this approach during implementation.
+2. **When the decision matrix's `Plan` column says YES for this task's row:** Outline your implementation approach using the exploration output, `acceptance_criteria`, `testing_strategy`, `pitfalls`, and `verification_steps`. Follow this approach during implementation. **Read the column; do not re-derive the condition here** (D221). This item previously stated its own trigger ("medium+ OR 3+ key_files OR 3+ acceptance criteria lines"), which could fire on a row whose `Plan` column says Skip — the `small, 2+ key_files` row being the collision. A small task carrying 3+ key_files or 3+ acceptance-criteria lines is a mis-labelling signal to record in `completion_notes` and one line of `completion_summary`, never an independent planner trigger.
 
 ---
 
@@ -311,7 +313,7 @@ Follow:
 
 ## Step 6: Code Review (Decision Matrix)
 
-**Check the decision matrix from Step 3.** If the task is medium+ OR has 2+ key_files, review is required.
+**Check the decision matrix from Step 3.** Review is required when that matrix's **Review** column says YES for this task's row. **Read the column; do not re-derive the condition here** (D221). This line previously restated its own trigger ("medium+ OR 2+ key_files"), which disagreed with the matrix for a `small` defect with 1 `key_file` — the same defect class, in the Review column instead of the Plan column.
 
 **If the `task-reviewer` custom agent is available**, invoke it with the git diff of all your changes AND **every review field the task supplies — NO EXCEPTIONS, never a subset:** `acceptance_criteria`, `pitfalls`, `patterns_to_follow`, `testing_strategy`, `security_considerations`, `behaviour_test_matrix`, `description`, `what`, and `why`. This input list is owned by the reviewer's contract — keep it in sync with the "You will receive" line in `agents/task-reviewer.md` and Phase 3 of `stride-subagent-workflow`; do not maintain a shorter list here. Omitting a supplied field (most often `security_considerations`) is the D60 defect where a task's security considerations came back `not_assessed`.
 
@@ -967,7 +969,7 @@ The `name` field must be one of these six values. Do not invent new names — co
 | Step name | When to record it | Orchestrator step |
 |---|---|---|
 | `explorer` | Codebase exploration (`task-explorer` custom agent when available, otherwise manual file reads) | Step 3 |
-| `planner` | Implementation planning (manual outline of approach for medium+ tasks) | Step 3 |
+| `planner` | Implementation planning (manual outline of approach when the Step 3 matrix's Plan column says YES) | Step 3 |
 | `implementation` | Writing code | Step 4 |
 | `reviewer` | Code review (`task-reviewer` custom agent when available, otherwise self-review) | Step 6 |
 | `after_doing` | The `after_doing` hook execution | Step 7 |
@@ -1083,7 +1085,7 @@ STEP 3: Explore (Decision Matrix)
   Goal/large undecomposed? --> Invoke task-decomposer (or manual) --> Claim first child --> Step 1
   Small, 0-1 key_files?   --> Skip to Step 4
   Otherwise:
-    Invoke task-explorer (or read manually), outline approach if medium+
+    Invoke task-explorer (or read manually), outline approach when the matrix's Plan column says YES
   |
   v
 STEP 4: Implement
