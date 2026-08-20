@@ -24,6 +24,20 @@ Why accepted rather than backfilled:
 
 The audit also found **zero** GitHub releases without a matching tag, so the record is incomplete in only this one direction.
 
+## [Unreleased]
+
+### Added — the Step 3 matrix gains a precedence order and a fallback row, and skip telemetry gains a closed `reason_code` vocabulary (W2110, D239)
+
+Three additions, all documentation-only, all in `skills/stride-workflow/SKILL.md` with one mirror update alongside. Together they supply the substance for the two canon rules this port carried no statement of, and place the anchor comments the fleet drift check reads for all four in-scope rules.
+
+**1. Row precedence — the matrix now says which row wins.** The Step 3 matrix is the sole decision point for its four columns, but a second ambiguity one level down went untouched: the rows are not mutually exclusive. A `medium` defect matches `medium (any)` and `Defect type` both, and with no stated order two runners on identically-shaped tasks could resolve it differently and write different skip reasons into `workflow_steps` — the same failure D221 was about, relocated from the prose into the table. The matrix is now read top-down in a fixed order — Branch A, then `small, 0-1 key_files` irrespective of task type, then `Defect type`, then the plain complexity row, then the fallback — presented as an order table that gives the reason each row sits where it does. **Order 2 sitting above order 3 does real work:** the small-single-file row is a cost threshold rather than a claim about the kind of work, and demoting it beneath `Defect type` would hand every one-file defect an explorer and a reviewer, which Branch B rules out. Resolving an ambiguity should not change behaviour; this is the order that does not.
+
+**2. A `Complexity absent or unrecognised` fallback row.** A task whose `complexity` is missing or unrecognised previously matched no row at all. The matrix gains that row last — Decompose Skip, Explore YES, Plan YES, Review YES — so an unreadable complexity runs the full workflow rather than silently skipping it, and the precedence order confines the row to its purpose: it fires only when `complexity` is absent or is not one of the three known values, and is never a tiebreaker between rows that did match. The `stride-subagent-workflow` mirror gains the matching row, because that table is required to agree with Step 3 row for row.
+
+**3. A closed `reason_code` vocabulary for skipped steps (D239).** The Per-Step Schema gains an optional `reason_code` key for entries with `dispatched: false`, plus a new **Picking a `reason_code`** subsection listing the six permitted values — `decision_matrix_skip`, `ran_inline`, `hook_body_empty`, `subsumed_by_task_spec`, `folded_into_prior_step`, `matrix_deviation` — each with the condition it records and whether the skip it names is a compliant one. The code travels **alongside** the prose `reason` and never replaces it: the code is what aggregates across runs, the prose is what a human reads. The list is closed — a value outside it is rejected with a `422` — and omitting the key remains valid, so no payload that completes today stops completing. **`matrix_deviation` is the one value that records non-compliance,** and the subsection says so outright, because the cheap alternative is to record a required-but-skipped step under `decision_matrix_skip` and leave the tally looking untroubled.
+
+Producer-side only: no new completion field, no server-side change, and no existing payload becomes invalid.
+
 ## [1.34.0] - 2026-08-19
 
 

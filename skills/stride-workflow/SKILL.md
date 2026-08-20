@@ -259,8 +259,23 @@ The `hooks.json` `tool.execute.after` handler automatically executes `.stride.md
 | medium (any) | Skip | YES | YES | YES |
 | large (any) | Skip | YES | YES | YES |
 | Defect type | Skip | YES | Skip (unless large) | YES |
+| Complexity absent or unrecognised | Skip | YES | YES | YES |
 
+<!-- canon:decision-matrix-authority v1 -->
 **This matrix is the SOLE decision point for the Decompose, Explore, Plan, and Review columns.** Nothing elsewhere in this plugin may state a second, separately-satisfiable condition for any of them; where other prose mentions one of these steps it describes what this matrix already decided and defers to it. **If any prose appears to give an independent trigger, the matrix wins.** That ambiguity was defect D221, and this rule is its fix.
+
+<!-- canon:row-precedence v1 -->
+**Several rows can describe the same task, and the table's printed sequence is not what decides between them.** A `medium` defect is matched by `medium (any)` and by `Defect type`; with nothing to break the tie, two runners could route identical tasks differently and file different skip reasons into `workflow_steps` — the D221 ambiguity relocated out of prose and into a table. Resolve a clash by this ranking instead. It tracks the printed order closely — `Defect type` is the one row that moves, rising from sixth to third — but it is the ranking, not the table layout, that decides:
+
+| Rank | Row | Why it ranks here |
+|---|---|---|
+| 1 | `Goal type OR large+undecomposed OR 25+ hours` | Decomposition supersedes the rest; nothing below is examined once it hits |
+| 2 | `small, 0-1 key_files` | A cost threshold that disregards type entirely — a single-file change stays a single-file change, defect label or not |
+| 3 | `Defect type` | Ranks above the bare complexity rows because it was written about defects; its `Skip (unless large)` means `Plan = YES` on a `large` defect and `Plan = Skip` on any other |
+| 4 | `small, 2+ key_files` / `medium (any)` / `large (any)` | Ordinary complexity match |
+| 5 | `Complexity absent or unrecognised` | Only when `complexity` is missing or carries an unknown value — it settles nothing between rows that already matched |
+
+One row and one row only comes out of that ranking for any given task, which is what the per-column guidance assumes when it tells you to consult a cell. Rank 2 deliberately outranks rank 3: swap the two and a one-file defect would pick up an explorer and a reviewer it is not meant to have, contradicting Branch B. Fixing an ambiguity ought not to move any task onto a different path, and this ranking moves none.
 
 ### Branch A: Goal / Large Undecomposed Task
 
@@ -985,6 +1000,25 @@ Each element of `workflow_steps` is an object with these keys:
 | `dispatched` | boolean | Always | `true` if the step ran; `false` if intentionally skipped |
 | `duration_ms` | integer | When `dispatched=true` | Wall-clock time the step took, in milliseconds |
 | `reason` | string | When `dispatched=false` | Short explanation of why the step was skipped |
+| `reason_code` | enum | Optional, when `dispatched=false` | The skip category in machine-readable form (D239). It travels **with** `reason`, never instead of it — see [Picking a `reason_code`](#picking-a-reason_code) for the six permitted values |
+
+<!-- canon:reason-code-vocabulary v1 -->
+### Picking a `reason_code`
+
+`reason_code` is the machine-readable half of a skip record, drawn from a list of exactly six (D239). It rides with `reason` rather than replacing it: the code is what can be tallied across runs, the prose is what a person reads.
+
+| Code | Record it when | Compliant skip? |
+|---|---|---|
+| `decision_matrix_skip` | Step 3's matrix marks this step skipped for the row the task resolved to | Yes |
+| `ran_inline` | The step happened in the main loop rather than through a dispatched agent | Yes |
+| `hook_body_empty` | The corresponding `.stride.md` body is blank, leaving the hook nothing to execute (`after_doing` / `before_review` only) | Yes |
+| `subsumed_by_task_spec` | The specification had already answered what the step would have decided | Yes |
+| `folded_into_prior_step` | An earlier step's output already covers this one | Yes |
+| `matrix_deviation` | The matrix required the step and it was deliberately skipped | **No — this is the non-compliance code** |
+
+**`matrix_deviation` is the sole value that admits non-compliance, and reaching for `decision_matrix_skip` in its place is precisely the misfiling this closed list exists to prevent** — a departure from the matrix would go on record as an approved skip, and nothing downstream would ever surface it. Spell out the circumstances in `reason`.
+
+A value outside the six is refused by the completion API with a `422`. Omitting the key is always acceptable, so nothing that completes today stops completing.
 
 ### End-of-Workflow Example (full dispatch)
 
