@@ -24,7 +24,7 @@ Why accepted rather than backfilled:
 
 The audit also found **zero** GitHub releases without a matching tag, so the record is incomplete in only this one direction.
 
-## [Unreleased]
+## [1.35.0] - 2026-08-20
 
 ### Added — the Step 3 matrix gains a precedence order and a fallback row, and skip telemetry gains a closed `reason_code` vocabulary (W2110, D239)
 
