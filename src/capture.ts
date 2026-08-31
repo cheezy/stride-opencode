@@ -49,6 +49,17 @@ type ShellHelper = (
   ...expressions: (string | string[])[]
 ) => ShellCommandPromise;
 
+// (W2150) The loop-state writer needs an atomic rename; Bun.write alone is
+// not atomic. These are the only node: imports in this module.
+import {
+  existsSync,
+  mkdirSync,
+  renameSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
+
 export interface ChangedFile {
   path: string;
   diff: string;
@@ -135,6 +146,10 @@ export async function captureChangedFiles(
     // — narrower than the bash hook's whole-`.stride/`-directory prefix exclude;
     // a future sibling file under `.stride/` would need its own entry here.
     CANONICAL_RESPONSE_FILE,
+    // (W2150) The loop-state record is the sibling this comment anticipated:
+    // hook bookkeeping under .stride/, never task output, and it needs its own
+    // exact-match entry for the same reason.
+    LOOP_STATE_FILE,
   ]);
 
   // Dedupe by path (tracked and untracked should not overlap, but the Set
@@ -142,7 +157,13 @@ export async function captureChangedFiles(
   const allPaths: string[] = [];
   const seen = new Set<string>();
   for (const p of [...trackedList, ...untrackedSet]) {
-    if (p && !ROOT_ARTIFACTS.has(p) && !seen.has(p)) {
+    // (W2150) `.stride/` is skipped by PREFIX, not by exact match: the
+    // loop-state writer's staging file `.stride/loop-state.<pid>.<ts>.<rand>.tmp`
+    // is normally renamed or unlinked, but an orphan left by a killed process
+    // would otherwise pass the untracked net and be uploaded. This matches
+    // stride-pi's changed-files.ts and the shell hook, and covers every future
+    // sibling under the runtime directory without a new entry each time.
+    if (p && !p.startsWith(".stride/") && !ROOT_ARTIFACTS.has(p) && !seen.has(p)) {
       seen.add(p);
       allPaths.push(p);
     }
@@ -735,6 +756,135 @@ export async function clearEnvCache(projectDir: string): Promise<void> {
     await Bun.file(`${projectDir}/${ENV_CACHE_FILE}`).unlink();
   } catch {
     // File didn't exist — that's the expected path
+  }
+}
+
+/**
+ * (W2150) Loop-state record — the OpenCode port of stride-hook.sh's W2123
+ * helpers and of the clear in its before_doing branch.
+ *
+ * This is a FLEET contract, not a port-local artifact: stride's
+ * stride-stop-gate.sh (and its PowerShell twin) reads exactly these four keys
+ * out of a shared checkout, so the shape here matches the shell writer key for
+ * key and type for type. `needs_review` is the literal JSON boolean — the gate
+ * tests `(.needs_review | type) == "boolean"`, so a stringified "false"
+ * silently defeats terminal-state-2 detection rather than erroring.
+ */
+export const LOOP_STATE_FILE = ".stride/.loop-state.json";
+
+/** The record, in the shell writer's key order. */
+export interface LoopStateRecord {
+  identifier: string;
+  needs_review: boolean;
+  completed_at: string;
+  session_id: string;
+}
+
+/** Mirror of stride-hook.sh:loop_state_safe (non-empty, <=64, [A-Za-z0-9_.:-]). */
+export function loopStateSafe(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    value.length > 0 &&
+    value.length <= 64 &&
+    /^[A-Za-z0-9_.:-]+$/.test(value)
+  );
+}
+
+/**
+ * `date -u +%Y-%m-%dT%H:%M:%SZ`.
+ *
+ * toISOString() yields milliseconds; strip them with a regex rather than
+ * slice(0, 19), which would silently corrupt an ISO extended-year timestamp
+ * into garbage that still looks like a date.
+ */
+export function completedAtNow(now: Date = new Date()): string {
+  return now.toISOString().replace(/\.\d{3}Z$/, "Z");
+}
+
+/**
+ * (W2150) Atomic and never fatal — the mechanics of write_loop_state. Bun.write
+ * alone is NOT atomic (a reader can see a half-file), so the payload is staged
+ * on a temp path inside the destination `.stride/` directory and renamed into
+ * place same-filesystem. Best-effort: every failure path cleans up the temp and
+ * returns false; a completion never fails because this did.
+ */
+export async function writeLoopState(
+  projectDir: string,
+  record: LoopStateRecord,
+): Promise<boolean> {
+  const dir = `${projectDir}/.stride`;
+  const dest = `${projectDir}/${LOOP_STATE_FILE}`;
+  let tmp = "";
+  try {
+    // A rename onto a fifo/socket/directory would "succeed" and put the record
+    // where no reader looks. Refuse a non-regular destination, as the shell does.
+    if (existsSync(dest) && !statSync(dest).isFile()) {
+      process.stderr.write(
+        "stride: loop-state path is not a regular file; not recording\n",
+      );
+      return false;
+    }
+    mkdirSync(dir, { recursive: true });
+    tmp = `${dir}/loop-state.${process.pid}.${Date.now()}.${Math.random()
+      .toString(36)
+      .slice(2, 8)}.tmp`;
+    // Key order and the trailing newline match the shell writer's jq object
+    // literal and its `printf '%s\n'`. needs_review is written as the boolean
+    // it already is — never String()'d.
+    const json =
+      JSON.stringify({
+        identifier: record.identifier,
+        needs_review: record.needs_review,
+        completed_at: record.completed_at,
+        session_id: record.session_id,
+      }) + "\n";
+    // Created 0600 rather than written-then-chmod'd: staging with Bun.write
+    // and relaxing the mode afterwards leaves the payload world-readable for
+    // the window in between, and a failed chmod would rename a 0644 file into
+    // place. Matches the Pi twin, which passes the mode at creation time.
+    writeFileSync(tmp, json, { encoding: "utf-8", mode: 0o600 });
+    renameSync(tmp, dest);
+    return true;
+  } catch {
+    try {
+      if (tmp) rmSync(tmp, { force: true });
+    } catch {
+      // best effort
+    }
+    // The shell announces every failure branch, and Pi mirrors it. Without
+    // this an operator sees a green completion and an absent record with no
+    // explanation. Still best-effort and still non-fatal.
+    try {
+      process.stderr.write("stride: could not record the loop state; continuing\n");
+    } catch {
+      // best effort
+    }
+    return false;
+  }
+}
+
+/**
+ * (W2150) Remove the record on a claim. Unlink, not an empty write: the gate
+ * treats absence as "undetermined", but a `{}` file parses and would read as a
+ * record with no usable needs_review. Missing file is the expected path (same
+ * shape as clearEnvCache); a clear that FAILS is announced, because a surviving
+ * stale record is the dangerous direction.
+ */
+export async function clearLoopState(projectDir: string): Promise<void> {
+  const dest = `${projectDir}/${LOOP_STATE_FILE}`;
+  try {
+    await Bun.file(dest).unlink();
+  } catch {
+    // File didn't exist — that's the expected path
+  }
+  try {
+    if (existsSync(dest)) {
+      process.stderr.write(
+        `stride: could not clear the loop state at ${dest}; a stale completion record remains\n`,
+      );
+    }
+  } catch {
+    // best effort
   }
 }
 

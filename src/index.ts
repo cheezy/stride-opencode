@@ -21,6 +21,10 @@ import {
   writeCanonicalResponse,
   readCanonicalResponse,
   getAfterGoalStatus,
+  clearLoopState,
+  writeLoopState,
+  loopStateSafe,
+  completedAtNow,
 } from "./capture";
 
 // Re-export parser functions for backwards compatibility
@@ -45,6 +49,12 @@ export {
   getAfterGoalStatus,
   ENV_CACHE_FILE,
   CANONICAL_RESPONSE_FILE,
+  LOOP_STATE_FILE,
+  clearLoopState,
+  writeLoopState,
+  loopStateSafe,
+  completedAtNow,
+  type LoopStateRecord,
   AUTH_FILE,
   TRUNC_MARKER,
   BIN_PLACEHOLDER,
@@ -86,6 +96,90 @@ const TASK_ID_FROM_COMMAND_PATTERN =
 export function taskIdFromCommand(command: string): string | null {
   const match = TASK_ID_FROM_COMMAND_PATTERN.exec(command);
   return match ? match[1] : null;
+}
+
+/**
+ * (W2150) Mirror of stride-hook.sh:loop_state_payload_ok. A payload describes a
+ * SUCCESSFUL completion only when `.data.identifier` is a non-empty string AND
+ * `.data.needs_review` is a real boolean. Every failure body the API emits
+ * (422, 404, validation errors) lacks `.data` entirely and falls through to
+ * null, so a failed completion records nothing — this one predicate is the
+ * whole of that acceptance criterion.
+ *
+ * Reads ONLY `.data`, never a bare root object: extractEnvFromResponse falls
+ * back to the root and additionally String()s needs_review, so it is unusable
+ * here — a stringified "false" is exactly what the Stop gate's
+ * `type == "boolean"` test rejects. Never throws.
+ */
+export function loopStateFieldsFrom(
+  raw: string | null | undefined,
+): { identifier: string; needsReview: boolean } | null {
+  if (!raw) return null;
+  const root = peelPayloadRoot(raw);
+  if (!root) return null; // truncated body -> no write
+  const data = root.data;
+  if (!data || typeof data !== "object" || Array.isArray(data)) return null; // 422 -> no write
+  const rec = data as Record<string, unknown>;
+  const identifier = rec.identifier;
+  const needsReview = rec.needs_review;
+  if (typeof identifier !== "string" || identifier.length === 0) return null;
+  if (typeof needsReview !== "boolean") return null; // stringified -> no write
+  return { identifier, needsReview };
+}
+
+/**
+ * (W2150/D226) Is this canonical-file payload demonstrably THIS completion's?
+ * The file survives across calls, so an unguarded fallback records the previous
+ * claim as a completion that never happened. Two guards, both required:
+ * `.hooks` is an array (a completion bundles plural `hooks`; a claim carries
+ * singular `hook`), AND `.data.id` equals the id the intercepted command routed
+ * on. This is the only path that records anything when the harness truncates a
+ * large SUCCESS.
+ */
+export function canonicalBelongsToCompletion(
+  raw: string | null | undefined,
+  taskId: string | null | undefined,
+): boolean {
+  if (!raw || !taskId) return false;
+  const root = peelPayloadRoot(raw);
+  if (!root || !Array.isArray(root.hooks)) return false;
+  const data = root.data;
+  if (!data || typeof data !== "object" || Array.isArray(data)) return false;
+  const id = (data as Record<string, unknown>).id;
+  if (id === undefined || id === null) return false;
+  return String(id) === taskId;
+}
+
+/**
+ * (W2150) Is this raw body a GENUINE parse failure, as opposed to absent or
+ * merely uninteresting? The shell distinguishes two silent-no-write cases on
+ * purpose: a 422 legitimately records nothing and is not announced, but an
+ * UNPARSABLE body means the completion may well have succeeded server-side
+ * with the evidence simply lost. The non-empty guard keeps "no body at all"
+ * out of a channel that claims a body failed to parse, and a well-formed
+ * `false` or `null` body is parsable and so is never announced.
+ */
+export function isUnparsableBody(raw: string | null | undefined): boolean {
+  if (!raw) return false;
+  try {
+    JSON.parse(raw);
+    return false;
+  } catch {
+    return true;
+  }
+}
+
+/**
+ * (W2150) Best-effort session id for the loop-state record. Nothing else in
+ * this plugin reads it today, so the shape is probed defensively rather than
+ * assumed; the caller maps an unusable value to "unknown".
+ */
+export function extractSessionId(input: unknown): string {
+  const direct = (input as { sessionID?: unknown })?.sessionID;
+  if (typeof direct === "string" && direct) return direct;
+  const nested = (input as { input?: { sessionID?: unknown } })?.input?.sessionID;
+  if (typeof nested === "string" && nested) return nested;
+  return "";
 }
 
 
@@ -770,6 +864,16 @@ export const StridePlugin: Plugin = async (input) => {
       // falling back to the raw output when no file is present.
       const responseText = await preferCanonicalResponseText(projectDir, output);
 
+      // (W2150) A claim opens a new task window, so the previous completion's
+      // loop-state record is stale. Cleared unconditionally on ANY command
+      // matching the claim URL — success or failure — mirroring stride-hook.sh.
+      // Deliberately OUTSIDE the `&& output` guard below: a claim whose output
+      // the harness dropped must still invalidate the record, or a stale
+      // completion survives into the next task window.
+      if (hookName === "before_doing") {
+        await clearLoopState(projectDir);
+      }
+
       // Cache environment variables from claim response
       if (hookName === "before_doing" && output) {
         let envExtracted = false;
@@ -815,6 +919,46 @@ export const StridePlugin: Plugin = async (input) => {
       // even when there is no before_review section to execute.
       if (hookName === "before_review") {
         await selfHealChangedFilesUpload(command);
+      }
+
+      // (W2150) Record the loop state for a successful completion — the fleet
+      // contract at .stride/.loop-state.json that stride's Stop gate reads out
+      // of a shared checkout. Placed after the self-heal and before the primary
+      // section, mirroring stride-hook.sh.
+      if (hookName === "before_review") {
+        try {
+          // Tier 1 is THIS call's own output, NOT `responseText`:
+          // preferCanonicalResponseText is canonical-file-first, and that file
+          // survives across calls, so on a truncated or 422 completion it still
+          // holds the previous CLAIM payload — which carries both fields and
+          // would record a completion that never happened (D226).
+          let fields = loopStateFieldsFrom(coerceOutputText(output));
+          if (
+            !fields &&
+            canonicalBelongsToCompletion(responseText, taskIdFromCommand(command))
+          ) {
+            fields = loopStateFieldsFrom(responseText); // Tier 2, guarded
+          }
+          if (!fields && isUnparsableBody(coerceOutputText(output))) {
+            // Mirrors stride-hook.sh: announce only a genuine parse failure,
+            // never a 422 and never an absent body.
+            process.stderr.write(
+              "stride: completion response was unparsable; no loop state recorded\n",
+            );
+          }
+          if (fields && loopStateSafe(fields.identifier)) {
+            const sid = extractSessionId(input);
+            await writeLoopState(projectDir, {
+              identifier: fields.identifier,
+              needs_review: fields.needsReview,
+              completed_at: completedAtNow(),
+              session_id: loopStateSafe(sid) ? sid : "unknown",
+            });
+          }
+        } catch {
+          // Never fatal to the already-succeeded /complete. coerceOutputText
+          // JSON.stringify's a host-supplied object and can throw on a cycle.
+        }
       }
 
       const strideMd = await readStrideMd();

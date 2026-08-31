@@ -17,6 +17,10 @@ import {
   peelPayloadRoot,
   responseHasAfterGoal,
   CANONICAL_RESPONSE_FILE,
+  LOOP_STATE_FILE,
+  loopStateFieldsFrom,
+  canonicalBelongsToCompletion,
+  extractSessionId,
   StridePlugin,
 } from "./index";
 
@@ -2757,6 +2761,286 @@ describe("StridePlugin — W1639 end-to-end after_goal under truncation", () => 
       const result = await runComplete(hooks, completeResponseWithAfterGoal("G227").slice(0, 50));
       const commandsOutput = result!.commands_output as { stdout: string }[];
       expect(commandsOutput[0].stdout).toBe("gid=4969\n");
+    } finally {
+      cleanup(dir);
+    }
+  });
+});
+
+// --- W2150: the loop-state record ---
+//
+// The discriminator is the whole of "a failed or 422 completion writes
+// nothing", so it is tested as a pure function first, then at the plugin level
+// where the D226 staleness trap actually bites.
+
+describe("loopStateFieldsFrom / canonicalBelongsToCompletion (W2150)", () => {
+  function completeBody(identifier: string, needsReview: boolean, id = 42): string {
+    return JSON.stringify({
+      data: { id, identifier, needs_review: needsReview },
+      hooks: [],
+    });
+  }
+
+  it("reads a successful completion out of .data", () => {
+    expect(loopStateFieldsFrom(completeBody("W2150", false))).toEqual({
+      identifier: "W2150",
+      needsReview: false,
+    });
+    expect(loopStateFieldsFrom(completeBody("W42", true))).toEqual({
+      identifier: "W42",
+      needsReview: true,
+    });
+  });
+
+  it("unwraps the Bash-tool {stdout} envelope", () => {
+    const wrapped = JSON.stringify({ stdout: completeBody("W7", false) });
+    expect(loopStateFieldsFrom(wrapped)).toEqual({
+      identifier: "W7",
+      needsReview: false,
+    });
+  });
+
+  it("a failed 422 completion yields nothing", () => {
+    const body = JSON.stringify({ errors: { completion_summary: ["can't be blank"] } });
+    expect(loopStateFieldsFrom(body)).toBeNull();
+  });
+
+  it("a truncated response yields nothing", () => {
+    expect(loopStateFieldsFrom('{"data":{"identifier":"W21')).toBeNull();
+  });
+
+  it("rejects a stringified needs_review — the gate tests for a boolean", () => {
+    const body = JSON.stringify({
+      data: { id: 1, identifier: "W1", needs_review: "false" },
+      hooks: [],
+    });
+    expect(loopStateFieldsFrom(body)).toBeNull();
+  });
+
+  it("refuses a bare root object — only .data counts", () => {
+    const bare = JSON.stringify({ id: 42, identifier: "W42", needs_review: false });
+    expect(loopStateFieldsFrom(bare)).toBeNull();
+  });
+
+  it("(D226) requires a plural hooks array and a matching data.id", () => {
+    expect(canonicalBelongsToCompletion(completeBody("W42", false, 42), "42")).toBe(true);
+    expect(canonicalBelongsToCompletion(completeBody("W42", false, 42), "43")).toBe(false);
+    expect(canonicalBelongsToCompletion(completeBody("W42", false, 42), null)).toBe(false);
+    // A claim payload carries the SINGULAR `hook`.
+    const claim = JSON.stringify({
+      hook: { name: "before_doing" },
+      data: { id: 42, identifier: "W42", needs_review: false },
+    });
+    expect(canonicalBelongsToCompletion(claim, "42")).toBe(false);
+    expect(canonicalBelongsToCompletion(null, "42")).toBe(false);
+    expect(canonicalBelongsToCompletion("not json", "42")).toBe(false);
+  });
+
+  it("extracts a session id defensively", () => {
+    expect(extractSessionId({ sessionID: "ses_abc" })).toBe("ses_abc");
+    expect(extractSessionId({ input: { sessionID: "ses_nested" } })).toBe("ses_nested");
+    expect(extractSessionId({})).toBe("");
+    expect(extractSessionId(undefined)).toBe("");
+  });
+});
+
+describe("StridePlugin — W2150 loop-state record", () => {
+  const originalFetch = globalThis.fetch;
+
+  beforeEach(() => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (globalThis as any).fetch = async () => new Response("", { status: 200 });
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  async function initRepo(): Promise<string> {
+    const dir = mkdtempSync(join(tmpdir(), "stride-oc-loopstate-"));
+    await $`git init -q`.cwd(dir).quiet();
+    await $`git config user.email "test@test.local"`.cwd(dir).quiet();
+    await $`git config user.name "Test"`.cwd(dir).quiet();
+    writeFileSync(join(dir, ".gitignore"), ".stride.md\n");
+    writeFileSync(join(dir, "tracked.txt"), "v1\n");
+    await $`git add .gitignore tracked.txt`.cwd(dir).quiet();
+    await $`git commit -q -m v1`.cwd(dir).quiet();
+    return dir;
+  }
+
+  function cleanup(dir: string): void {
+    try {
+      rmSync(dir, { recursive: true, force: true });
+    } catch {
+      /* best-effort */
+    }
+  }
+
+  async function instantiate(dir: string) {
+    const hooks = await StridePlugin({ directory: dir, worktree: dir, $ } as never);
+    return hooks as {
+      "tool.execute.after": (i: unknown, o?: unknown) => Promise<void>;
+    };
+  }
+
+  const CLAIM_CMD = "curl -X POST http://localhost/api/tasks/claim";
+  const COMPLETE_CMD =
+    'curl -X PATCH http://localhost/api/tasks/42/complete -H "Authorization: Bearer tok"';
+  // A claim response that DOES carry needs_review — this is what makes the
+  // D226 trap reachable: it is a valid loop-state payload from the wrong call.
+  const CLAIM_RESPONSE = JSON.stringify({
+    hook: { name: "before_doing" },
+    data: { id: 42, identifier: "W42", needs_review: false, title: "T" },
+  });
+  const COMPLETE_RESPONSE = JSON.stringify({
+    data: { id: 42, identifier: "W42", needs_review: true },
+    hooks: [],
+  });
+
+  it("records then clears across a claim, complete, claim cycle", async () => {
+    const dir = await initRepo();
+    try {
+      const hooks = await instantiate(dir);
+      const loop = join(dir, LOOP_STATE_FILE);
+
+      await hooks["tool.execute.after"]({ input: { command: CLAIM_CMD } }, CLAIM_RESPONSE);
+      expect(existsSync(loop)).toBe(false);
+
+      await hooks["tool.execute.after"](
+        { sessionID: "ses_abc", input: { command: COMPLETE_CMD } },
+        COMPLETE_RESPONSE,
+      );
+      const rec = JSON.parse(readFileSync(loop, "utf8"));
+      expect(rec.identifier).toBe("W42");
+      expect(rec.needs_review).toBe(true);
+      expect(typeof rec.needs_review).toBe("boolean");
+      expect(rec.session_id).toBe("ses_abc");
+
+      await hooks["tool.execute.after"]({ input: { command: CLAIM_CMD } }, CLAIM_RESPONSE);
+      expect(existsSync(loop)).toBe(false);
+    } finally {
+      cleanup(dir);
+    }
+  });
+
+  it("(D226) a TRUNCATED completion records nothing, though the canonical file still holds the claim", async () => {
+    const dir = await initRepo();
+    try {
+      const hooks = await instantiate(dir);
+      const loop = join(dir, LOOP_STATE_FILE);
+
+      // The claim payload carries BOTH loop-state fields and is written to the
+      // canonical file. A truncated completion is NOT valid JSON, so
+      // captureCanonicalResponse leaves that file intact — meaning
+      // preferCanonicalResponseText still resolves the CLAIM. Without the D226
+      // guard the fallback would read it and record a completion that never
+      // happened. This is the one shape that reaches the trap: a 422 body is
+      // valid JSON and overwrites the file, so it cannot exercise it.
+      await hooks["tool.execute.after"]({ input: { command: CLAIM_CMD } }, CLAIM_RESPONSE);
+      expect(readFileSync(join(dir, CANONICAL_RESPONSE_FILE), "utf8")).toContain("W42");
+
+      await hooks["tool.execute.after"](
+        { sessionID: "ses_abc", input: { command: COMPLETE_CMD } },
+        COMPLETE_RESPONSE.slice(0, 40), // truncated mid-object
+      );
+      expect(existsSync(loop)).toBe(false);
+    } finally {
+      cleanup(dir);
+    }
+  });
+
+  it("a 422 completion records nothing", async () => {
+    const dir = await initRepo();
+    try {
+      const hooks = await instantiate(dir);
+      const loop = join(dir, LOOP_STATE_FILE);
+
+      await hooks["tool.execute.after"]({ input: { command: CLAIM_CMD } }, CLAIM_RESPONSE);
+      await hooks["tool.execute.after"](
+        { sessionID: "ses_abc", input: { command: COMPLETE_CMD } },
+        JSON.stringify({ errors: { completion_summary: ["can't be blank"] } }),
+      );
+      expect(existsSync(loop)).toBe(false);
+    } finally {
+      cleanup(dir);
+    }
+  });
+
+  it("(D226) a truncated completion DOES record when the canonical file is this completion", async () => {
+    const dir = await initRepo();
+    try {
+      const hooks = await instantiate(dir);
+      const loop = join(dir, LOOP_STATE_FILE);
+
+      await hooks["tool.execute.after"]({ input: { command: CLAIM_CMD } }, CLAIM_RESPONSE);
+      // The agent's `| tee` landed the full completion payload in the canonical
+      // file even though the harness truncated what the plugin was handed.
+      writeFileSync(join(dir, CANONICAL_RESPONSE_FILE), COMPLETE_RESPONSE);
+      await hooks["tool.execute.after"](
+        { sessionID: "ses_abc", input: { command: COMPLETE_CMD } },
+        COMPLETE_RESPONSE.slice(0, 40),
+      );
+      const rec = JSON.parse(readFileSync(loop, "utf8"));
+      expect(rec.identifier).toBe("W42");
+      expect(rec.needs_review).toBe(true);
+    } finally {
+      cleanup(dir);
+    }
+  });
+
+  it("falls back to session_id 'unknown' when the session id is unsafe or absent", async () => {
+    for (const bad of ["ses abc", "", "s".repeat(65), undefined]) {
+      const dir = await initRepo();
+      try {
+        const hooks = await instantiate(dir);
+        await hooks["tool.execute.after"](
+          { sessionID: bad, input: { command: COMPLETE_CMD } },
+          COMPLETE_RESPONSE,
+        );
+        const rec = JSON.parse(readFileSync(join(dir, LOOP_STATE_FILE), "utf8"));
+        expect(rec.session_id).toBe("unknown");
+        expect(rec.identifier).toBe("W42");
+      } finally {
+        cleanup(dir);
+      }
+    }
+  });
+
+  it("writes nothing when the identifier fails the charset or length guard", async () => {
+    for (const bad of ["W 42", "W/42", "x".repeat(65)]) {
+      const dir = await initRepo();
+      try {
+        const hooks = await instantiate(dir);
+        await hooks["tool.execute.after"](
+          { sessionID: "ses_abc", input: { command: COMPLETE_CMD } },
+          JSON.stringify({
+            data: { id: 42, identifier: bad, needs_review: false },
+            hooks: [],
+          }),
+        );
+        expect(existsSync(join(dir, LOOP_STATE_FILE))).toBe(false);
+      } finally {
+        cleanup(dir);
+      }
+    }
+  });
+
+  it("a claim clears the record even when the harness dropped its output", async () => {
+    const dir = await initRepo();
+    try {
+      const hooks = await instantiate(dir);
+      const loop = join(dir, LOOP_STATE_FILE);
+
+      await hooks["tool.execute.after"](
+        { sessionID: "ses_abc", input: { command: COMPLETE_CMD } },
+        COMPLETE_RESPONSE,
+      );
+      expect(existsSync(loop)).toBe(true);
+
+      // No output at all — the env-cache branch is skipped, but the clear is
+      // deliberately outside that guard.
+      await hooks["tool.execute.after"]({ input: { command: CLAIM_CMD } }, undefined);
+      expect(existsSync(loop)).toBe(false);
     } finally {
       cleanup(dir);
     }

@@ -1,5 +1,14 @@
 import { describe, expect, it, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
+import {
+  mkdtempSync,
+  rmSync,
+  writeFileSync,
+  mkdirSync,
+  existsSync,
+  readFileSync,
+  readdirSync,
+  chmodSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { $ } from "bun";
@@ -21,6 +30,11 @@ import {
   writeCanonicalResponse,
   readCanonicalResponse,
   CANONICAL_RESPONSE_FILE,
+  LOOP_STATE_FILE,
+  writeLoopState,
+  clearLoopState,
+  loopStateSafe,
+  completedAtNow,
   PUT_TIMEOUT_MS,
   TRUNC_MARKER,
   BIN_PLACEHOLDER,
@@ -1253,6 +1267,182 @@ describe("recordDiffUploadState / readDiffUploadState — D142 base persistence"
       expect(state?.base).toBeUndefined();
     } finally {
       cleanup(dir);
+    }
+  });
+});
+
+// (W2150) The loop-state record — the fleet contract stride's Stop gate reads.
+describe("writeLoopState / clearLoopState (W2150)", () => {
+  function tmp(): string {
+    return mkdtempSync(join(tmpdir(), "stride-oc-loop-"));
+  }
+
+  const REC = {
+    identifier: "W2150",
+    needs_review: false,
+    completed_at: "2026-08-31T14:03:22Z",
+    session_id: "ses_abc",
+  };
+
+  it("loopStateSafe accepts the fleet charset and rejects everything else", () => {
+    expect(loopStateSafe("W2150")).toBe(true);
+    expect(loopStateSafe("ses_a.b:c-d")).toBe(true);
+    expect(loopStateSafe("")).toBe(false);
+    expect(loopStateSafe("W 2150")).toBe(false);
+    expect(loopStateSafe("x".repeat(64))).toBe(true);
+    expect(loopStateSafe("x".repeat(65))).toBe(false);
+    expect(loopStateSafe(undefined)).toBe(false);
+    expect(loopStateSafe(42)).toBe(false);
+  });
+
+  it("completedAtNow reproduces `date -u +%Y-%m-%dT%H:%M:%SZ`", () => {
+    expect(completedAtNow(new Date("2026-08-31T14:03:22.123Z"))).toBe(
+      "2026-08-31T14:03:22Z",
+    );
+  });
+
+  it("creates .stride/ when absent and leaves no temp file behind", async () => {
+    const dir = tmp();
+    try {
+      expect(existsSync(join(dir, ".stride"))).toBe(false);
+      expect(await writeLoopState(dir, REC)).toBe(true);
+      const rec = JSON.parse(readFileSync(join(dir, LOOP_STATE_FILE), "utf8"));
+      expect(rec.identifier).toBe("W2150");
+      expect(rec.needs_review).toBe(false);
+      expect(typeof rec.needs_review).toBe("boolean");
+      expect(readdirSync(join(dir, ".stride"))).toEqual([".loop-state.json"]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("records needs_review true verbatim as a boolean", async () => {
+    const dir = tmp();
+    try {
+      await writeLoopState(dir, { ...REC, needs_review: true });
+      const rec = JSON.parse(readFileSync(join(dir, LOOP_STATE_FILE), "utf8"));
+      expect(rec.needs_review).toBe(true);
+      expect(typeof rec.needs_review).toBe("boolean");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("is never fatal when the write cannot succeed", async () => {
+    const dir = tmp();
+    try {
+      // .stride is a regular file, so mkdirSync throws.
+      writeFileSync(join(dir, ".stride"), "not a directory");
+      expect(await writeLoopState(dir, REC)).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses a non-regular destination rather than renaming into it", async () => {
+    const dir = tmp();
+    try {
+      mkdirSync(join(dir, LOOP_STATE_FILE), { recursive: true });
+      expect(await writeLoopState(dir, REC)).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("leaves no temp file behind when the staging write fails", async () => {
+    const dir = tmp();
+    try {
+      // Reach the catch AFTER `tmp` has been assigned: .stride exists but is
+      // not writable, so mkdirSync succeeds (already present) and the staging
+      // write throws EACCES. Residual limit, stated rather than implied: the
+      // temp is never created on this path, so what this proves is that the
+      // cleanup branch runs and leaves nothing — not that an already-created
+      // temp is unlinked. Reaching THAT would need a rename stub or a
+      // production seam, which a best-effort writer does not justify.
+      mkdirSync(join(dir, ".stride"), { recursive: true });
+      chmodSync(join(dir, ".stride"), 0o500);
+      expect(await writeLoopState(dir, REC)).toBe(false);
+      const leftovers = readdirSync(join(dir, ".stride")).filter((f) =>
+        /^loop-state\..*\.tmp$/.test(f),
+      );
+      expect(leftovers).toEqual([]);
+    } finally {
+      try {
+        chmodSync(join(dir, ".stride"), 0o700);
+      } catch {
+        /* best-effort */
+      }
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("a claim clears the record, and a missing file is not an error", async () => {
+    const dir = tmp();
+    try {
+      await clearLoopState(dir); // absent — must not throw
+      await writeLoopState(dir, REC);
+      expect(existsSync(join(dir, LOOP_STATE_FILE))).toBe(true);
+      await clearLoopState(dir);
+      expect(existsSync(join(dir, LOOP_STATE_FILE))).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("the loop-state path is excluded from a task's changed_files", async () => {
+    const { dir, base } = await initRepo();
+    try {
+      writeFileSync(join(dir, "a.txt"), "v2\n");
+      await writeLoopState(dir, REC);
+      // An orphan staging file, as a killed process would leave behind. It is
+      // covered by the .stride/ PREFIX skip, not by an exact-match entry.
+      writeFileSync(join(dir, ".stride", "loop-state.999.123.abcdef.tmp"), "{}\n");
+      const files = await captureChangedFiles($ as never, dir, base);
+      const paths = files.map((f) => f.path);
+      expect(paths).toContain("a.txt");
+      expect(paths).not.toContain(LOOP_STATE_FILE);
+      expect(paths.filter((f) => f.startsWith(".stride/"))).toEqual([]);
+    } finally {
+      cleanup(dir);
+    }
+  });
+
+  it("matches the fleet record shape every runtime reads", async () => {
+    const dir = tmp();
+    try {
+      await writeLoopState(dir, REC);
+      const loopStatePath = join(dir, LOOP_STATE_FILE);
+
+      // (W2150) The record is a FLEET contract: the shell Stop gate, the
+      // PowerShell twin and the other port all read this file out of a shared
+      // checkout. This block is byte-identical in
+      // stride-pi/extensions/hook-bridge/loop-state.test.ts and
+      // stride-opencode/src/capture.test.ts (modulo assert vs expect). If one
+      // port's writer drifts, exactly one of the two copies fails, and the
+      // diff names the drift.
+      const parsed = JSON.parse(readFileSync(loopStatePath, "utf8"));
+      expect(Object.keys(parsed)).toEqual([
+        "identifier",
+        "needs_review",
+        "completed_at",
+        "session_id",
+      ]);
+      expect(
+        Object.fromEntries(Object.entries(parsed).map(([k, v]) => [k, typeof v])),
+      ).toEqual({
+        identifier: "string",
+        needs_review: "boolean",
+        completed_at: "string",
+        session_id: "string",
+      });
+      expect(parsed.completed_at).toMatch(
+        /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/,
+      );
+      expect(parsed.identifier).toMatch(/^[A-Za-z0-9_.:-]{1,64}$/);
+      expect(parsed.session_id).toMatch(/^[A-Za-z0-9_.:-]{1,64}$/);
+      expect(readFileSync(loopStatePath, "utf8").endsWith("\n")).toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
     }
   });
 });
