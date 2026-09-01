@@ -24,7 +24,17 @@ Why accepted rather than backfilled:
 
 The audit also found **zero** GitHub releases without a matching tag, so the record is incomplete in only this one direction.
 
-## [Unreleased]
+## [1.36.0] - 2026-09-01
+
+### Added — the loop-state completion record (W2150)
+
+A successful `/complete` now writes `.stride/.loop-state.json`, and any claim clears it. Four keys, in the shell writer's order: `identifier`, `needs_review`, `completed_at`, `session_id`. This is a **fleet contract**, not a port-local artifact — stride's `stride-stop-gate.sh` and its PowerShell twin read exactly these keys out of a shared checkout — so `needs_review` is written as the literal JSON boolean rather than a string. That detail carries the whole contract: the gate tests `(.needs_review | type) == "boolean"`, so a stringified `"false"` would silently defeat terminal-state detection rather than erroring. `extractEnvFromResponse` is deliberately **not** reused for this, because it `String()`s that field and falls back to a bare root object; the record is read only from `.data`.
+
+The write is atomic — staged on a temp path inside `.stride/` and renamed into place, since `Bun.write` alone lets a reader see a half-file — and never fatal to the completion that triggered it. The clear is an unlink rather than an empty write, because `{}` parses and would read as a record with no usable verdict.
+
+Sourcing is two-tier and the fallback is guarded. Tier 1 is the intercepted call's own output, deliberately **not** `preferCanonicalResponseText`: that helper is canonical-file-first and the file survives across calls, so on a truncated completion it still resolves the previous **claim** payload — which carries both fields and would record a completion that never happened. Tier 2 admits the canonical file only when `.hooks` is an array and `.data.id` matches the id the command routed on. The regression test uses a truncated body rather than a 422 for a specific reason: a 422 body is valid JSON and overwrites the canonical file, so it cannot reach the trap at all.
+
+`.stride/.loop-state.json` is excluded from the uploaded `changed_files` diff, and the staging temp file with it — the `.stride/` exclusion is a path prefix rather than an exact match, so an orphan left by a killed process cannot be uploaded either.
 
 ### Added — an opt-in loop-continuation advisory, and the record of why no hook here can gate (W2152)
 
