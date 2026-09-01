@@ -53,10 +53,10 @@ type ShellHelper = (
 // not atomic. These are the only node: imports in this module.
 import {
   existsSync,
+  lstatSync,
   mkdirSync,
   renameSync,
   rmSync,
-  statSync,
   writeFileSync,
 } from "node:fs";
 
@@ -818,11 +818,19 @@ export async function writeLoopState(
   try {
     // A rename onto a fifo/socket/directory would "succeed" and put the record
     // where no reader looks. Refuse a non-regular destination, as the shell does.
-    if (existsSync(dest) && !statSync(dest).isFile()) {
-      process.stderr.write(
-        "stride: loop-state path is not a regular file; not recording\n",
-      );
-      return false;
+    // lstat, not stat: statSync RESOLVES symlinks, so a link pointing at a
+    // regular file passes isFile() and the rename would replace the link while
+    // a plain write would truncate its target. lstat sees the link itself.
+    // (W2152: mirrored from recordInjection, which hit the same weakness.)
+    try {
+      if (!lstatSync(dest).isFile()) {
+        process.stderr.write(
+          "stride: loop-state path is not a regular file; not recording\n",
+        );
+        return false;
+      }
+    } catch {
+      // ENOENT — the ordinary first-write case.
     }
     mkdirSync(dir, { recursive: true });
     tmp = `${dir}/loop-state.${process.pid}.${Date.now()}.${Math.random()
@@ -861,6 +869,45 @@ export async function writeLoopState(
     }
     return false;
   }
+}
+
+/**
+ * (W2152) Read and validate the loop-state record from disk — the reader W2150
+ * never needed, because that task only wrote.
+ *
+ * Null on an absent, unreadable, or non-JSON file, and on any field that fails
+ * the writer's own rules: a reader that accepted a record the writer would not
+ * produce would be reading something other than the fleet contract.
+ * `needs_review` must be a real boolean for the same reason the writer insists
+ * on one — a stringified "false" is unusable, not falsy. Never throws.
+ */
+export async function readLoopState(
+  projectDir: string,
+): Promise<LoopStateRecord | null> {
+  let text: string;
+  try {
+    text = await Bun.file(`${projectDir}/${LOOP_STATE_FILE}`).text();
+  } catch {
+    return null;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return null;
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+  const rec = parsed as Record<string, unknown>;
+  if (!loopStateSafe(rec.identifier)) return null;
+  if (typeof rec.needs_review !== "boolean") return null;
+  if (typeof rec.completed_at !== "string" || rec.completed_at.length === 0) return null;
+  if (typeof rec.session_id !== "string" || rec.session_id.length === 0) return null;
+  return {
+    identifier: rec.identifier,
+    needs_review: rec.needs_review,
+    completed_at: rec.completed_at,
+    session_id: rec.session_id,
+  };
 }
 
 /**

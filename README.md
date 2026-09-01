@@ -309,6 +309,29 @@ Non-Stride commands pass through without any intervention.
 
 **Gitignored state artifacts.** `.stride-changed-files.json` (the captured per-file diff), `.stride-diff-upload-state` (the upload bookkeeping marker), and `.stride-env-cache` (the persisted claim env cache — task metadata such as `TASK_ID`, `TASK_IDENTIFIER`, `TASK_TITLE`, and `TASK_BASE_REF` from `POST /api/tasks/claim`, **never the API token**) are transient hook state, not source, and all three are listed in `.gitignore`. The first two are regenerated on every `after_doing` run; `.stride-env-cache` is written at claim, lazily reloaded after a plugin or session restart so a mid-task restart doesn't lose `TASK_ID`/`TASK_BASE_REF`, and cleared at `after_review`. Committing them would pollute diffs and could leak the previous task's working-tree contents, so they stay out of the `after_doing` auto-commit, out of the `changed_files` capture, and out of version control entirely.
 
+### Loop continuation (advisory, not a gate) — off unless you turn it on
+
+After a completion that recorded `needs_review: false`, the plugin can start **one follow-up turn** naming the task that is claimable now. It is **off by default**. Set `STRIDE_OPENCODE_ADVISORY=1` (or `true`/`on`/`yes`) to enable it; with anything else, including unset, the handler returns on its second line, reads no file and makes no request.
+
+**Nothing on this runtime can gate, and the reason is structural.** OpenCode's plugin `Hooks` interface has no session-end or turn-end entry at all — the only hook that can observe a session going idle is the generic `event` hook. The runtime dispatches it as `void hook["event"]?.({ ... })` inside a synchronous `Effect.sync` (`packages/opencode/src/plugin/index.ts:259`): the promise your handler returns is discarded by the `void` operator and never awaited. Every *other* hook is routed through `Plugin.trigger` in the same file, which does `yield* Effect.promise(...)` and honours the value the hook returns. That asymmetry is deliberate — `event` is a notification channel, not a lifecycle decision point. A handler there cannot refuse, delay or veto anything, and throwing from it accomplishes nothing except an unhandled rejection inside the host. (The `experimental.hook.session_completed` field in `opencode.json` has **not** been removed, but it is no help either: it is a config-driven shell command with no `client` handle, so it cannot inject a prompt into the session.)
+
+So when enabled this **starts a new turn**; it does not stop an old one from ending. That is a stronger action than the sibling ports take — Pi's advisory decorates a turn the human already chose to start — and it is why the default is off. All of these must hold before a single request is made, and the first four are read off disk:
+
+- the completion record `.stride/.loop-state.json` exists and parses,
+- it recorded `needs_review: false`,
+- its `session_id` is a real id (never the `unknown` sentinel) and equals the idle event's session,
+- its `completed_at` is within the last **15 minutes** and not in the future,
+- the injection budget for this session and this completion is not spent,
+- `GET /api/tasks/next` returns an identifier-shaped identifier.
+
+**Bounds.** The counter lives at `.stride/.opencode-advisory-continuations`, is keyed on `<session id>:<completed identifier>`, and defaults to **one** injection per unfollowed completion per session — one, not the Pi port's two, because here each injection *is* a whole turn rather than a note attached to one you were having anyway. Override with `STRIDE_OPENCODE_ADVISORY_MAX`, unsigned decimal only; anything else is ignored and the default stands. The counter is written *before* the prompt is sent, because a re-prompt starts a turn that will itself go idle — an injection the plugin cannot count is one it cannot bound. It is reset on the next claim, and when the record is absent or says a review is owed.
+
+**What reaches the prompt.** A task identifier and nothing else — never a token, a URL, or a response body. An identifier that is not `^[A-Za-z0-9_-]{1,32}$`-shaped is refused outright rather than cleaned up, because a scrubbed value is still a value someone else chose and it lands in text a model reads.
+
+**Enabling this authorises an open-ended loop, not a single nudge.** The budget bounds one *unfollowed completion*: a successful claim resets it, so each advisory that works leads to a claim, which re-arms the budget for the next task. With the flag on, an agent can therefore work an entire queue turn after turn with nobody watching, and the pacing is set by whatever `GET /api/tasks/next` keeps returning. That is the feature's purpose rather than a defect, but it is the thing you are switching on, so it is stated here rather than left to be discovered.
+
+**Known rough edge.** `session.idle` fires on *every* turn completion, ordinary ones included; the guards above are the only thing distinguishing an abandoned Stride loop from an idle session. And because the event fires the moment the turn ends, a re-prompt can land while you are composing your next message. The prompt says outright that it was generated automatically, so it is identifiable when it does.
+
 ### `.stride.md` parser rules
 
 - Only the first ```` ```bash ```` block per section is executed

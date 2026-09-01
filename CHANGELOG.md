@@ -24,6 +24,36 @@ Why accepted rather than backfilled:
 
 The audit also found **zero** GitHub releases without a matching tag, so the record is incomplete in only this one direction.
 
+## [Unreleased]
+
+### Added — an opt-in loop-continuation advisory, and the record of why no hook here can gate (W2152)
+
+**The decision: adopt a re-prompt, and default it off.**
+
+Stride's Claude Code plugin refuses to end a session while a claimable task remains — `stride-stop-gate.sh` exits 2 from a `Stop` hook and the harness honours it. This port has no equivalent surface, and the evidence is not a matter of degree. The plugin `Hooks` interface carries no session-end or turn-end entry in any published version we checked (`@opencode-ai/plugin` 1.3.2, the version this repo resolves, and 1.18.25, current `latest` — the key list is identical). The only hook that can observe a session going idle is the generic `event` hook, and the runtime dispatches it as `void hook["event"]?.({ ... })` inside a synchronous `Effect.sync` (`packages/opencode/src/plugin/index.ts:259`). The `void` operator discards the promise; the enclosing generator never yields on it. Every other typed hook in that same file goes through `Plugin.trigger`, which does `yield* Effect.promise(...)` and uses what comes back. The runtime distinguishes the two on purpose: `event` is a notification, and a handler on it is structurally incapable of refusing anything. Throwing from it does not block a stop; it produces an unhandled rejection in the host and the session ends anyway.
+
+A correction to an assumption carried into this work: `experimental.hook.session_completed` has **not** been removed. It is present byte-identical in both SDK versions checked. It is simply unsuited — a config-driven shell command with no `client` handle and no access to plugin state, so it cannot inject a prompt into a session without someone building a second delivery path around it. Unsuited, not gone.
+
+Given no veto exists, the port ships the weaker thing that does: with `STRIDE_OPENCODE_ADVISORY=1`, an `event` handler watching `session.idle` correlates the event's session against the completion record at `.stride/.loop-state.json`, asks `GET /api/tasks/next` whether anything is claimable, and calls `session.promptAsync` to start one turn naming that task.
+
+**Why it defaults off.** The sibling Pi port's mechanism is passive: `before_agent_start` decorates a turn a human already chose to start. This one is active — it starts a turn nobody asked for, after a session went idle, possibly while the human is mid-sentence. That is a difference in kind, not in strength. `session.idle` also fires for every ordinary idle and carries no completion context whatsoever, so all of the correctness rests on correlating it against a record on disk; a misfire burns tokens and can begin work no one authorised. Shipping it opt-in delivers the capability without imposing it, and with the variable unset the whole feature costs one string comparison per idle.
+
+**Bounds and blast radius.** The re-prompt is bounded by a counter at `.stride/.opencode-advisory-continuations`, keyed on `<session id>:<completed identifier>` and defaulting to one injection — the session id is in the key so two sessions sharing a checkout cannot spend each other's budget, and the completed identifier is in it so a long session that legitimately completes a second task is not silently muted by the first. The default is one rather than the Pi port's two because here each injection is itself a turn. The counter is written before the prompt is sent: a re-prompt starts a turn that will go idle and re-enter this handler, so an uncounted injection is an unbounded one. An in-memory mirror and a synchronous in-flight reservation cover the two ways that brake could otherwise slip — a counter file deleted mid-session, and two idle events arriving in the same tick. Beyond the counter, three independent guards must all pass: an exact session-id match (the `unknown` sentinel is never an identity), a 15-minute freshness bound on `completed_at`, and `needs_review: false`. Only the identifier of the claimable task reaches the prompt text, and it is refused rather than sanitised when it is not identifier-shaped.
+
+**What enabling the flag actually authorises.** The counter bounds one unfollowed completion, and a successful claim resets it — so each advisory that works leads to a claim that re-arms the budget for the next task. There is no session-lifetime or global cap: with the flag on, an agent can work a whole queue unattended, paced by whatever `/api/tasks/next` returns, which makes the server the party choosing how much unsupervised work happens. That chaining is the point of a loop-continuation feature rather than an oversight, and it is why the flag is off by default; it is recorded here, and in the README beside the flag, so nobody enables it expecting a single nudge.
+
+**Still open, for whoever has a running instance.** `SessionPromptAsyncData.body` carries a `noReply` flag. If `noReply: true` appends the message to the session *without* running a model turn, that would make this port's mechanism passive in exactly the Pi sense — the human sees the advisory when they next look, and no unrequested turn ever starts — and it would deserve to become the default. The semantics could not be verified without a live instance, so the verified active path shipped instead. The manual verification of this feature should answer it.
+
+**Reversal:** reopen if a future OpenCode release routes `event` through `Plugin.trigger`, or adds any session-end hook whose result the runtime honours. The advisory would then become a fallback for older runtimes rather than the mechanism.
+
+### Added — `readLoopState`
+
+A validating disk reader for `.stride/.loop-state.json`, the counterpart to the writer added in W2150. Returns null for anything the writer would not have produced, including a stringified `needs_review`.
+
+### Fixed — `.stride/` is now gitignored
+
+W2150 began writing `.stride/.loop-state.json` into a repo whose `.gitignore` had no `.stride/` entry, so the record was offered for commit. The directory is now ignored wholesale, covering the loop-state record, the canonical API-response capture and the new advisory counter.
+
 ## [1.35.0] - 2026-08-20
 
 ### Added — the Step 3 matrix gains a precedence order and a fallback row, and skip telemetry gains a closed `reason_code` vocabulary (W2110, D239)

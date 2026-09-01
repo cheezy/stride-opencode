@@ -28,3 +28,8 @@ bun.lock
 .stride-diff-upload-state
 .stride-env-cache
 .stride_auth.md
+
+# (W2152) Stride plugin state DIRECTORY — the loop-state completion record
+# (W2150), the canonical API-response capture, and the advisory-continuation
+# counter. All session-scoped and regenerated; none of it is source.
+.stride/

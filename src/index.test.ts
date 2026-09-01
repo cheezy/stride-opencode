@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync, existsSync, readFileSync, mkdirSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { $ } from "bun";
+import { ADVISORY_COUNTER_FILE } from "./advisory-continuation";
 import {
   parseStrideMd,
   filterCommands,
@@ -18,6 +19,7 @@ import {
   responseHasAfterGoal,
   CANONICAL_RESPONSE_FILE,
   LOOP_STATE_FILE,
+  completedAtNow,
   loopStateFieldsFrom,
   canonicalBelongsToCompletion,
   extractSessionId,
@@ -3043,6 +3045,300 @@ describe("StridePlugin — W2150 loop-state record", () => {
       expect(existsSync(loop)).toBe(false);
     } finally {
       cleanup(dir);
+    }
+  });
+});
+
+// --- W2152: the session.idle advisory continuation ---
+//
+// OFF by default. These drive the plugin's `event` hook directly and assert on
+// a recording client stub; globalThis.fetch is stubbed per the existing
+// convention so nothing here reaches the network.
+
+describe("StridePlugin — W2152 advisory continuation", () => {
+  const originalFetch = globalThis.fetch;
+  let fetchCalls: string[] = [];
+  let prompts: Array<{ id: string; text: string }> = [];
+
+  function recordingClient() {
+    return {
+      session: {
+        promptAsync: async (o: unknown) => {
+          const call = o as { path: { id: string }; body: { parts: Array<{ text: string }> } };
+          prompts.push({
+            id: call.path.id,
+            text: call.body.parts.map((p) => p.text).join(""),
+          });
+          return { data: {} };
+        },
+      },
+    };
+  }
+
+  beforeEach(() => {
+    fetchCalls = [];
+    prompts = [];
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (globalThis as any).fetch = async (url: unknown) => {
+      fetchCalls.push(String(url));
+      return new Response(JSON.stringify({ data: { identifier: "W2153" } }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    };
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+    delete process.env.STRIDE_OPENCODE_ADVISORY;
+    delete process.env.STRIDE_OPENCODE_ADVISORY_MAX;
+  });
+
+  function fixture(dir: string, over: Record<string, unknown> = {}): void {
+    mkdirSync(join(dir, ".stride"), { recursive: true });
+    writeFileSync(
+      join(dir, ".stride_auth.md"),
+      "- **API URL:** `http://localhost:4000`\n- **API Token:** `test-not-a-real-token`\n",
+    );
+    writeFileSync(
+      join(dir, LOOP_STATE_FILE),
+      JSON.stringify({
+        identifier: "W2150",
+        needs_review: false,
+        completed_at: completedAtNow(),
+        session_id: "ses_abc",
+        ...over,
+      }) + "\n",
+    );
+  }
+
+  async function instantiate(dir: string, client: unknown = recordingClient()) {
+    const hooks = await StridePlugin({ directory: dir, worktree: dir, $, client } as never);
+    return hooks as unknown as {
+      event: (i: { event: { type: string; properties: Record<string, unknown> } }) => Promise<void>;
+      "tool.execute.after": (i: unknown, o?: unknown) => Promise<void>;
+    };
+  }
+
+  const idle = (id = "ses_abc") => ({
+    event: { type: "session.idle", properties: { sessionID: id } },
+  });
+
+  function tmp(): string {
+    return mkdtempSync(join(tmpdir(), "stride-oc-w2152-"));
+  }
+
+  it("with the env var unset, makes no request, writes no counter, sends no prompt", async () => {
+    const dir = tmp();
+    try {
+      fixture(dir);
+      const hooks = await instantiate(dir);
+      await hooks.event(idle());
+      expect(fetchCalls).toEqual([]);
+      expect(prompts).toEqual([]);
+      expect(existsSync(join(dir, ADVISORY_COUNTER_FILE))).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("STRIDE_OPENCODE_ADVISORY=0 is off, not truthy-on", async () => {
+    const dir = tmp();
+    try {
+      process.env.STRIDE_OPENCODE_ADVISORY = "0";
+      fixture(dir);
+      const hooks = await instantiate(dir);
+      await hooks.event(idle());
+      expect(fetchCalls).toEqual([]);
+      expect(prompts).toEqual([]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("when enabled, starts one turn in the idle session naming the API's identifier", async () => {
+    const dir = tmp();
+    try {
+      process.env.STRIDE_OPENCODE_ADVISORY = "1";
+      fixture(dir);
+      const hooks = await instantiate(dir);
+      await hooks.event(idle());
+      expect(prompts).toHaveLength(1);
+      expect(prompts[0]!.id).toBe("ses_abc");
+      expect(prompts[0]!.text).toContain("W2153");
+      expect(prompts[0]!.text).not.toContain("test-not-a-real-token");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("(edge) an ordinary idle with no completion record does nothing at all", async () => {
+    const dir = tmp();
+    try {
+      process.env.STRIDE_OPENCODE_ADVISORY = "1";
+      fixture(dir);
+      rmSync(join(dir, LOOP_STATE_FILE));
+      const hooks = await instantiate(dir);
+      await hooks.event(idle());
+      expect(fetchCalls).toEqual([]);
+      expect(prompts).toEqual([]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("(edge) an idle in a different session than the record's is an ordinary idle", async () => {
+    const dir = tmp();
+    try {
+      process.env.STRIDE_OPENCODE_ADVISORY = "1";
+      fixture(dir);
+      const hooks = await instantiate(dir);
+      await hooks.event(idle("ses_unrelated"));
+      expect(fetchCalls).toEqual([]);
+      expect(prompts).toEqual([]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("(edge) a non-idle event is ignored before anything is read", async () => {
+    const dir = tmp();
+    try {
+      process.env.STRIDE_OPENCODE_ADVISORY = "1";
+      fixture(dir);
+      const hooks = await instantiate(dir);
+      await hooks.event({
+        event: { type: "session.updated", properties: { sessionID: "ses_abc" } },
+      });
+      expect(fetchCalls).toEqual([]);
+      expect(prompts).toEqual([]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("(edge) two idles arriving together produce ONE prompt, not two", async () => {
+    const dir = tmp();
+    try {
+      process.env.STRIDE_OPENCODE_ADVISORY = "1";
+      fixture(dir);
+      const hooks = await instantiate(dir);
+      await Promise.all([hooks.event(idle()), hooks.event(idle())]);
+      expect(prompts).toHaveLength(1);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("(edge) a bounced idle does not release the in-flight invocation's reservation", async () => {
+    const dir = tmp();
+    try {
+      process.env.STRIDE_OPENCODE_ADVISORY = "1";
+      fixture(dir);
+      const hooks = await instantiate(dir);
+      // THREE overlapping events, which is what it takes to see the leak. With
+      // an unconditional release in the finally, the second (bounced) idle
+      // clears the first's reservation while it is still awaiting, and the
+      // third then reserves afresh and decides concurrently with the first —
+      // both read count 0 and both inject, on a budget of one. Two events
+      // cannot expose it, because nothing arrives after the erroneous release.
+      await Promise.all([hooks.event(idle()), hooks.event(idle()), hooks.event(idle())]);
+      expect(prompts).toHaveLength(1);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("(edge) another event for the same session does not release the reservation", async () => {
+    const dir = tmp();
+    try {
+      process.env.STRIDE_OPENCODE_ADVISORY = "1";
+      fixture(dir);
+      const hooks = await instantiate(dir);
+      // Any event carrying properties.sessionID reaches the handler and returns
+      // early at the type check; it must not touch the reservation.
+      await Promise.all([
+        hooks.event(idle()),
+        hooks.event({
+          event: { type: "message.part.updated", properties: { sessionID: "ses_abc" } },
+        }),
+        hooks.event(idle()),
+      ]);
+      expect(prompts).toHaveLength(1);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("(edge) the re-prompt's own turn going idle does not start a second one", async () => {
+    const dir = tmp();
+    try {
+      process.env.STRIDE_OPENCODE_ADVISORY = "1";
+      fixture(dir);
+      const hooks = await instantiate(dir);
+      await hooks.event(idle()); // the advisory turn starts
+      await hooks.event(idle()); // ...and goes idle, re-entering the handler
+      expect(prompts).toHaveLength(1); // the counter, not luck, stops it
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("a claim resets the budget, so the next unfollowed completion is advised again", async () => {
+    const dir = tmp();
+    try {
+      process.env.STRIDE_OPENCODE_ADVISORY = "1";
+      fixture(dir);
+      const hooks = await instantiate(dir);
+      await hooks.event(idle());
+      expect(prompts).toHaveLength(1);
+      await hooks["tool.execute.after"](
+        { input: { command: "curl -X POST http://localhost/api/tasks/claim" } },
+        JSON.stringify({
+          hook: { name: "before_doing" },
+          data: { id: 1, identifier: "W1", needs_review: false },
+        }),
+      );
+      expect(existsSync(join(dir, ADVISORY_COUNTER_FILE))).toBe(false);
+      fixture(dir, { identifier: "W2151" });
+      await hooks.event(idle());
+      expect(prompts).toHaveLength(2);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("never rejects, even when the client throws — the runtime discards this promise", async () => {
+    const dir = tmp();
+    try {
+      process.env.STRIDE_OPENCODE_ADVISORY = "1";
+      fixture(dir);
+      const hooks = await instantiate(dir, {
+        session: {
+          promptAsync: async () => {
+            throw new Error("host is gone");
+          },
+        },
+      });
+      await expect(hooks.event(idle())).resolves.toBeUndefined();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("does nothing when the host supplied no client, and spends no budget", async () => {
+    const dir = tmp();
+    try {
+      process.env.STRIDE_OPENCODE_ADVISORY = "1";
+      fixture(dir);
+      const hooks = (await StridePlugin({ directory: dir, worktree: dir, $ } as never)) as unknown as {
+        event: (i: unknown) => Promise<void>;
+      };
+      await hooks.event(idle());
+      expect(fetchCalls).toEqual([]);
+      expect(existsSync(join(dir, ADVISORY_COUNTER_FILE))).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
     }
   });
 });

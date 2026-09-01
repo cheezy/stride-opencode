@@ -2,6 +2,11 @@ import type { Plugin } from "@opencode-ai/plugin";
 import { parseStrideMd, buildCommandList, type HookName } from "./parser";
 import { gateToolCall } from "./skill-gate";
 import {
+  advisoryEnabled,
+  decideAdvisoryContinuation,
+  resetInjectionCounter,
+} from "./advisory-continuation";
+import {
   executeHookCommands,
   resolveHookTimeoutMs,
   type HookResult,
@@ -22,6 +27,7 @@ import {
   readCanonicalResponse,
   getAfterGoalStatus,
   clearLoopState,
+  readLoopState,
   writeLoopState,
   loopStateSafe,
   completedAtNow,
@@ -475,6 +481,11 @@ export function extractHookEnvFromResponse(
 
 export const StridePlugin: Plugin = async (input) => {
   const { directory, worktree, $ } = input;
+  // (W2152) The SDK client, used only by the advisory continuation. Absent in
+  // the test suite's `as never` instantiations, so every use is guarded.
+  const { client } = input as unknown as {
+    client?: { session?: { promptAsync?: (o: unknown) => Promise<unknown> } };
+  };
   // (W1495) Test-only injection: PluginInput is a closed type, so tiny hook
   // budgets and kill-grace ride in via the same `as never` cast the tests
   // already use to instantiate the plugin.
@@ -773,7 +784,80 @@ export const StridePlugin: Plugin = async (input) => {
     process.stdout.write(formatHookResultJson(agResult) + "\n");
   }
 
+  // (W2152) Advisory-continuation state, per plugin instance.
+  //
+  // `advisoryInFlight` is set SYNCHRONOUSLY before the first await: two
+  // session.idle events in one tick would otherwise both read count 0 from
+  // disk and both prompt. `advisoryMemCounts` mirrors the on-disk counter so a
+  // counter file removed mid-session (an `after_doing` `git clean -xdf` is not
+  // hypothetical) cannot turn a bounded advisory into a self-driven prompt loop
+  // — this mechanism re-triggers itself, so that is a runaway, not a hiccup.
+  const advisoryInFlight = new Set<string>();
+  const advisoryMemCounts = new Map<string, number>();
+
   return {
+    // (W2152) Loop continuation — advisory, OFF unless STRIDE_OPENCODE_ADVISORY
+    // is explicitly enabled.
+    //
+    // NOT a gate. This runtime dispatches the event hook as
+    // `void hook["event"]?.(...)` inside a synchronous Effect.sync
+    // (packages/opencode/src/plugin/index.ts:259), discarding whatever we
+    // return, while every other hook goes through Plugin.trigger and is
+    // awaited. So nothing here can refuse a stop; when enabled this STARTS A
+    // NEW TURN after the old one already ended. See the CHANGELOG entry.
+    //
+    // The try/catch is not decoration: because the dispatch is `void` with no
+    // .catch, an escaping rejection becomes an unhandled rejection in the host
+    // process rather than a no-op.
+    event: async ({ event }: { event: { type?: string; properties?: Record<string, unknown> } }) => {
+      const sessionId =
+        typeof event?.properties?.sessionID === "string" ? event.properties.sessionID : "";
+      // Tracks whether THIS invocation made the reservation. Releasing
+      // unconditionally in the finally would let any early return -- a bounced
+      // concurrent idle, or any other event carrying a sessionID -- clear a
+      // reservation still held by an in-flight invocation, after which a later
+      // idle reserves afresh and two decides run concurrently on one budget.
+      let reserved = false;
+      try {
+        if (event?.type !== "session.idle") return;
+        if (!advisoryEnabled(process.env)) return;
+        if (typeof client?.session?.promptAsync !== "function") return;
+        if (!sessionId) return;
+        // Reserved synchronously, before any await.
+        if (advisoryInFlight.has(sessionId)) return;
+        advisoryInFlight.add(sessionId);
+        reserved = true;
+
+        const decision = await decideAdvisoryContinuation({
+          projectDir,
+          sessionId,
+          fetch: ((...args: Parameters<typeof globalThis.fetch>) =>
+            globalThis.fetch(...args)) as typeof globalThis.fetch,
+          memCounts: advisoryMemCounts,
+        });
+        if (!decision.inject) return;
+
+        await client.session.promptAsync({
+          path: { id: sessionId },
+          query: { directory: projectDir },
+          body: { parts: [{ type: "text", text: decision.text, synthetic: true }] },
+        });
+      } catch {
+        // The budget stays spent on a delivery failure: retrying is how a
+        // bounded mechanism becomes unbounded, and the cost is one missed
+        // advisory.
+        try {
+          process.stderr.write(
+            "stride: advisory continuation could not be delivered; continuing\n",
+          );
+        } catch {
+          // best effort
+        }
+      } finally {
+        if (reserved) advisoryInFlight.delete(sessionId);
+      }
+    },
+
     "tool.execute.before": async (input, output) => {
       // --- Skill-activation gate ---
       // Block direct activation of internal Stride sub-skills unless the
@@ -872,6 +956,11 @@ export const StridePlugin: Plugin = async (input) => {
       // completion survives into the next task window.
       if (hookName === "before_doing") {
         await clearLoopState(projectDir);
+        // (W2152) A claim opens a new task window, so the advisory budget for
+        // the previous completion is moot. Same unconditional-on-any-claim
+        // placement as the clear above.
+        resetInjectionCounter(projectDir);
+        advisoryMemCounts.clear();
       }
 
       // Cache environment variables from claim response
