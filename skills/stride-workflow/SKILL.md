@@ -358,6 +358,7 @@ The reviewer returns a human-readable prose summary followed by a fenced ```json
 - **Fix all Critical issues** before proceeding
 - **Fix all Important issues** before proceeding — **through round two; after it, record them per the cap above, never a `category: "security"` one**
 - Minor issues are optional but recommended — **except a `category: "security"` one, which is never optional and never recordable at any severity; fix or escalate it per the cap above**
+- **A round whose findings are ALL cosmetic buys no further review round (W2165).** A `cosmetic: true` issue is presentational only, on the two-gate test `agents/task-reviewer.md` defines — **do not re-derive it from a list here**; that file's own passthrough doctrine forbids a consumer keeping its own copy of what the owner enumerates, and the definition's central instruction is that its examples are a test, never a list to match against. It is reported and recorded like any other finding but never spends a round. If every entry in `issues[]` is cosmetic, fix them or not as you choose — except a `category: "security"` one, which the bullet above keeps non-optional at any severity — and **proceed to completion without re-invoking the reviewer**; a single substantive finding alongside them means the round is not all-cosmetic and the normal path applies. **The predicate reads `issues[]` only, while `status` has three inputs** — issues, `not_met` criteria and `not_met` project checks — so an all-cosmetic round is not by itself a round that found nothing that matters: **if `status` is `changes_requested`, honour that and re-invoke regardless — subject to the ceiling above.** **An absent or empty `issues[]` is never an all-cosmetic round**, and on the JSON-parse fallback below — which omits `issues[]` by construction while the prose still reports real findings — this rule is **inapplicable rather than satisfied**, the same scoping the cap above already carries. Never `cosmetic` on a `critical`, an `important`, or a `category: "security"` finding; **this port checks none of that** — the prohibition is stated and followed, not enforced, on the same terms as the cap. Its definition is owned by `agents/task-reviewer.md`.
 - **Save the reviewer's full response (prose + JSON block)** -- you'll include it verbatim as `review_report` in Step 8. **When review ran more than one round, save the LAST round's response as `review_report`** — it is the one whose block you submit as `reviewer_result`, so the two agree — and rely on the cap's recording duty above to carry any earlier-round finding the last round did not re-enumerate into `completion_notes`
 
 #### Extracting the structured review block
@@ -427,7 +428,7 @@ Approved
 
 ```json
 {
-  "schema_version": "1.6",
+  "schema_version": "1.7",
   "summary": "Reviewed 3 acceptance criteria and 4 pitfalls against the diff; no issues found and all criteria met.",
   "status": "approved",
   "issue_counts": {"critical": 0, "important": 0, "minor": 0},
@@ -455,7 +456,7 @@ Approved
   "summary": "Reviewed 3 acceptance criteria and 4 pitfalls against the diff; no issues found and all criteria met.",
   "issues_found": 0,
   "acceptance_criteria_checked": 3,
-  "schema_version": "1.6",
+  "schema_version": "1.7",
   "status": "approved",
   "issue_counts": {"critical": 0, "important": 0, "minor": 0},
   "issues": [],
