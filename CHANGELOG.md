@@ -24,6 +24,46 @@ Why accepted rather than backfilled:
 
 The audit also found **zero** GitHub releases without a matching tag, so the record is incomplete in only this one direction.
 
+## [1.37.0] - 2026-09-04
+
+Ports the three review-convergence rules stride shipped in its 1.74.0 (goal G429). Each was adapted to this port's own surfaces rather than copied across: where a stride sentence named a mechanism that does not exist here it was rewritten, and where a rule cannot be mechanically enforced here that is stated rather than implied.
+
+### Added — a two-round ceiling on review (W2164)
+
+Review is capped at two rounds, and the second verifies round one's fixes rather than re-reviewing. A round is an invocation of the `task-reviewer` whose response yielded a first fenced ```json block that parsed — the boundary this port already draws between its extraction snippet and its JSON-parse fallback — so a reviewer that crashes or returns nothing parsable consumes no round, and the definition names no file this port lacks.
+
+A stored counter was considered and rejected. One that failed to persist would silently *reset* the cap, where this port's existing counter precedent fails toward refusal instead.
+
+The cap is prose, and the text says so rather than implying a mechanism. The reviewer's block carries no round number, so an assert over it would read a value the agent had supplied from its own memory a line earlier; the canon anchor added here checks the rule's presence, never its sentence. `stride-subagent-workflow` was amended alongside, because its "you do NOT need to re-run the reviewer" bullet contradicted the cap outright.
+
+Fourteen defects were found in this text before it shipped, and all were fixed. Five were rated Major by an exploratory session — among them that "stop without completing" named no terminal state anywhere, and that a minor security finding had no available exit.
+
+### Added — an optional `cosmetic` class on reviewer findings (W2165)
+
+Entries in `issues[]` may carry an optional `cosmetic` boolean, defined in the reviewer contract and dispositioned in Step 6.
+
+The work was threading it against this port's own status rule: a minor never contributes to `changes_requested`, so an all-cosmetic round and an approved one are not equivalent here. The disposition therefore defers to `status` rather than overriding it, and an absent or empty `issues[]` is never an all-cosmetic round — without that clause the rule would be vacuously true on the JSON-parse fallback, which omits `issues[]`.
+
+The prohibition is prose in this port and the change states it plainly: the JavaScript self-check never inspects the keys of an `issues[]` entry, so no throw was added.
+
+`schema_version` moves 1.6 → 1.7 at five current-sense sites. Historical clauses were deliberately left alone — rewriting a true statement about the past would have written a false one into the very change that codifies that a false statement is never cosmetic.
+
+An exploratory session then found five further defects and established that none of them was authored here: all five are inherited verbatim from stride, and four sit inside canon-anchored paragraphs whose governance requires a two-place version bump. Fixing those in one port would make it diverge from the text the canon quotes, so they are recorded and owed upstream instead.
+
+### Added — `dispatch_count` review-cost telemetry, and the limits on reading it (W2166)
+
+The `reviewer` entry of `workflow_steps` may now carry an optional `dispatch_count`: how many times that step's subagent was dispatched, counting a re-dispatch after a crash, because a crashed dispatch still spent its tokens. It counts dispatches, not rounds. Omitting it stays valid, so an older version of this port completes exactly as before, and no seventh step name is added — a new key is not a new name.
+
+The six limits on how the figure may be read ship with it, inline rather than in a companion file, because this port keeps one `SKILL.md` per skill. Three of stride's sentences were rewritten because they named mechanisms absent here:
+
+- stride settles a crash-versus-round question afterwards from a persisted round-count artifact. This port writes none, and Step 6 expressly declines to make the round a structured field, so the distinction dies with the session — which makes "never read a cap breach out of `dispatch_count` alone" a stronger rule here, not a weaker one.
+- stride counts its deep security review among the gates with no reviewer precondition. In this port that review is a sub-step inside Step 6, which a small task skips entirely, so it cannot be reached on the review-skipped path at all.
+- stride's account of a port self-check as prose is wrong of this one. The check is executable JavaScript; what is true is that it asserts nothing about `workflow_steps`.
+
+### Fixed — the exploratory step's wall-clock was folded nowhere (W2166)
+
+Step 6.5 dispatches an exploratory session, but unlike the deep security review and Step 6.6 it carried no telemetry fold rule, so that session's wall-clock reached no `workflow_steps` entry. It now folds into the existing `reviewer` entry like its two siblings, mirrored into `stride-subagent-workflow` Phase 3.5 and the `stride-completing-tasks` manual-testing section.
+
 ## [1.36.0] - 2026-09-01
 
 ### Added — the loop-state completion record (W2150)
