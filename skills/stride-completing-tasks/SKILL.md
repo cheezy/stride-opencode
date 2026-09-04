@@ -447,7 +447,7 @@ saved separately as `review_report`.
 
 ## Recording Manual & Exploratory Testing Findings (Optional)
 
-When the **Manual & Exploratory Testing** step ran — `stride-workflow` Step 6.5 / `stride-subagent-workflow` Phase 3.5 dispatched the `stride-opencode-exploratory-testing` extension because the task carried `manual_tests` and the extension was available — record its findings in **existing completion fields only**. There is **no new server-validated field and no new `workflow_steps` name** for manual testing; introducing either would break strict completion validation (a 422).
+When the **Manual & Exploratory Testing** step ran — `stride-workflow` Step 6.5 / `stride-subagent-workflow` Phase 3.5 dispatched the `stride-opencode-exploratory-testing` extension because the task carried `manual_tests` and the extension was available — record its findings in **existing completion fields only**. There is **no new server-validated field and no new `workflow_steps` name** for manual testing; introducing either would break strict completion validation (a 422). The session's wall-clock folds into the existing `reviewer` entry, exactly as the hardening sub-step's does below; and when no reviewer ran, that entry is the skip form carrying no duration, so the dispatch is recorded in `completion_notes` rather than given an invented one.
 
 **Where the findings go (both are tolerant, free-text existing fields):**
 
@@ -737,7 +737,7 @@ When strict mode is on and a payload fails validation:
 
 Until the server flips `:strict_completion_validation` to true, missing or invalid `explorer_result`/`reviewer_result` produces a structured warning log but the request succeeds. **Emit the fields correctly now** — agents that lag the rollout will start getting 422 rejections on the flip day.
 
-**Schema reference:** The `workflow_steps` array must match the schema documented in the `stride-workflow` skill — key-for-key. Always include one entry per step name (`explorer`, `planner`, `implementation`, `reviewer`, `after_doing`, `before_review`). Skipped steps use `{"name": "<step>", "dispatched": false, "reason": "<why>"}`.
+**Schema reference:** The `workflow_steps` array must match the schema documented in the `stride-workflow` skill — key-for-key. **`dispatch_count` (optional, W2130)** rides on a `dispatched: true` entry and records how many times that subagent was dispatched — on the `reviewer` entry, how many times the `task-reviewer` itself was dispatched, review rounds and crashed re-dispatches alike, since a crashed dispatch still spent its tokens. It covers that agent only: the deep security-considerations review and the Step 6.5/6.6 dispatches fold into the same entry's `duration_ms` without being counted here. It counts **dispatches, not rounds** (rounds exclude a crash), adds no seventh step name, and **omitting it stays valid**. Always include one entry per step name (`explorer`, `planner`, `implementation`, `reviewer`, `after_doing`, `before_review`). Skipped steps use `{"name": "<step>", "dispatched": false, "reason": "<why>"}`.
 
 **Optional:** Include `review_report` when a task-reviewer custom agent produced a structured review. Omit it when no review was performed (e.g., small tasks with 0-1 key_files).
 
