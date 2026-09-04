@@ -200,9 +200,9 @@ The reviewer returns a human-readable prose summary followed by a fenced ```json
 
 **If issues are found:**
 - Fix all Critical issues before proceeding
-- Fix Important issues before proceeding
-- Minor issues are optional but recommended
-- After fixing, you do NOT need to re-run the reviewer — proceed to the after_doing hook
+- Fix **all** Important issues before proceeding — through round two; after it, record them per Step 6's cap, never a `category: "security"` one
+- Minor issues are optional but recommended — **except a `category: "security"` one, which is never optional and never recordable at any severity; fix or escalate it per the cap above**
+- After fixing, **re-invoke the reviewer to verify those fixes** — review is capped at **two rounds**, the second scoped to verifying the first's fixes while still receiving the full diff. The ceiling, what the second invocation carries, the record-don't-fix disposition after it, the `critical` exemption and the never-recordable `category: "security"` rule are stated in `stride-workflow` Step 6 — **keep the two in sync; an edit there needs the matching edit here.** No canon anchor lives in this file: the canon assigns one per rule per port directory and this port's is placed beside Step 6.
 
 The extraction of the reviewer's fenced ```json block into the `reviewer_result` completion field (legacy↔structured field mapping and the JSON-parse-failure fallback) is owned by the `stride-workflow` skill's Step 6 ("Extracting the structured review block") and applied when the completion payload is built via `stride-completing-tasks`. It is not duplicated here.
 
