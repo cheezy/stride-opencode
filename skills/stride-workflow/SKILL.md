@@ -277,6 +277,8 @@ The `hooks.json` `tool.execute.after` handler automatically executes `.stride.md
 
 One row and one row only comes out of that ranking for any given task, which is what the per-column guidance assumes when it tells you to consult a cell. Rank 2 deliberately outranks rank 3: swap the two and a one-file defect would pick up an explorer and a reviewer it is not meant to have, contradicting Branch B. Fixing an ambiguity ought not to move any task onto a different path, and this ranking moves none.
 
+Both halves above are shared rather than local: the sentence under the matrix is entry `decision-matrix-authority` of `stride/docs/port-canon.md`, and the rank table with the sentence closing it is entry `row-precedence` in the same document. **Rewriting the substance of either owes two version bumps in the same change**: one on that canon entry, one on the anchor that introduces it here.
+
 ### Branch A: Goal / Large Undecomposed Task
 
 If the task is a **goal**, has **large complexity without child tasks**, or has a **25+ hour estimate**:
@@ -352,6 +354,8 @@ Follow:
 **A `minor` `category: "security"` finding is the case this most often reaches, so size the response to it.** The prohibition on recording a security finding is class-wide by design, but it is not an instruction to abandon a nit: **fix it if it is fixable, and it usually is.** Stop-and-report is for a security finding you genuinely cannot resolve — not for one you disagree with. If you judge the finding mistaken, that judgement is itself something to report and have a human settle; it is never grounds to drop it silently.
 
 The reviewer-side half of this rule — what round two is asked to do, and the two carve-outs that survive its mission scoping — is in `agents/task-reviewer.md`. `stride-subagent-workflow` Phase 3 does **not** restate this cap — it carries the dispatch-side bullets and names the five elements (the ceiling, round two's scoping, the record-don't-fix disposition, the `critical` exemption and the `category: "security"` prohibition), then defers here for their content. **So most edits to this section need no Phase 3 change at all; keep the pointer accurate if the elements it names change.**
+
+The rule above is shared, not local — it is entry `review-round-cap` of `stride/docs/port-canon.md`, and that is where its substance is held for every port. **Rewriting the substance here owes two version bumps in the same change**: one on that canon entry, one on the anchor beside it.
 
 The reviewer returns a human-readable prose summary followed by a fenced ```json block. The schema of that block is owned by `agents/task-reviewer.md` — do not duplicate field definitions here.
 
@@ -1042,6 +1046,8 @@ Each element of `workflow_steps` is an object with these keys:
 **`matrix_deviation` is the sole value that admits non-compliance, and reaching for `decision_matrix_skip` in its place is precisely the misfiling this closed list exists to prevent** — a departure from the matrix would go on record as an approved skip, and nothing downstream would ever surface it. Spell out the circumstances in `reason`.
 
 A value outside the six is refused by the completion API with a `422`. Omitting the key is always acceptable, so nothing that completes today stops completing.
+
+The rule above is shared, not local — it is entry `reason-code-vocabulary` of `stride/docs/port-canon.md`, and that is where its substance is held for every port. **Rewriting the substance here owes two version bumps in the same change**: one on that canon entry, one on the anchor beside it.
 
 ### End-of-Workflow Example (full dispatch)
 
