@@ -309,6 +309,8 @@ Non-Stride commands pass through without any intervention.
 
 **Gitignored state artifacts.** `.stride-changed-files.json` (the captured per-file diff), `.stride-diff-upload-state` (the upload bookkeeping marker), and `.stride-env-cache` (the persisted claim env cache — task metadata such as `TASK_ID`, `TASK_IDENTIFIER`, `TASK_TITLE`, and `TASK_BASE_REF` from `POST /api/tasks/claim`, **never the API token**) are transient hook state, not source, and all three are listed in `.gitignore`. The first two are regenerated on every `after_doing` run; `.stride-env-cache` is written at claim, lazily reloaded after a plugin or session restart so a mid-task restart doesn't lose `TASK_ID`/`TASK_BASE_REF`, and cleared at `after_review`. Committing them would pollute diffs and could leak the previous task's working-tree contents, so they stay out of the `after_doing` auto-commit, out of the `changed_files` capture, and out of version control entirely.
 
+<!-- canon:stdout-preservation-guard v1 -->
+
 **The fleet's stdout-preservation curl guard, and the one thing it would still catch here.** The shell-based plugins refuse a Stride API curl that conceals its output, because in those runtimes the completion reply is the source the per-file diff is parsed from. This plugin does not parse a diff from a reply: `capture.ts` shells `git` itself and the `PUT` goes out on the plugin's own `fetch()`, so a concealed reply cannot empty the snapshot.
 
 What a concealed reply can still do is send it to the wrong place. The upload's task id comes from `taskIdFromCommand`, whose pattern accepts digits only, and falls back to the claim-derived entry in `.stride-env-cache` when the completion URL carries an identifier instead — a form the server accepts. Behind a concealed claim response that entry still describes the *previous* task, so the diff uploads against it and returns 2xx with nothing to notice. Filed as **D309**.
@@ -316,6 +318,8 @@ What a concealed reply can still do is send it to the wrong place. The upload's 
 The canonical-response file is worth naming precisely, because it looks like it already covers this and does not. It was built against host *truncation*: it is written from the tool output, so under `-o` or a redirect there is nothing to write, and the file-first read then returns an earlier call's payload — which can substitute a stale identity rather than recover the real one. It mitigates the case it was designed for, not concealment.
 
 None of this is a claim that the plugin has nowhere to enforce such a rule. `tool.execute.before` runs ahead of the command and already refuses completions when `after_doing` fails. Revisit this section when D309 lands, and drop the second and third paragraphs if the upload target becomes resolvable from the request in every URL form.
+
+**Canon-governed — entry `stdout-preservation-guard` in `stride/docs/port-canon.md`.** The canon records this port as owing the rule: the diff is not read from a reply here, but the claim-derived task identity is, and that identity is the upload's destination. Move what the rule obliges and two versions move before release — the canon entry's, and the one on this file's `<!-- canon:stdout-preservation-guard ... -->` anchor above.
 
 ### Loop continuation (advisory, not a gate) — off unless you turn it on
 
