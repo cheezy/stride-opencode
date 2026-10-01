@@ -24,6 +24,20 @@ Why accepted rather than backfilled:
 
 The audit also found **zero** GitHub releases without a matching tag, so the record is incomplete in only this one direction.
 
+## [1.39.0] - 2026-10-01
+
+### Fixed — an identifier-form completion URL no longer routes the diff through a stale claim cache (D309)
+
+`taskIdFromCommand` read only a numeric id, while the server also resolves `/api/tasks/<identifier>/complete`. A completion URL such as `/api/tasks/W2185/complete` therefore returned null and the `changed_files` upload fell back to `.stride-env-cache`, whose `TASK_ID` still names the previous task when the claim response was concealed — so the diff landed on that task with a 2xx and nothing to notice. The pattern now accepts a numeric id or a `G`/`W`/`D` identifier and still returns null for anything else; its shape is otherwise unchanged, so the numeric path behaves exactly as before. The closed character class keeps the captured id safe to interpolate into the PUT path. The `??` fallback stays for ids that are not literal in the command, such as a shell-expanded `$TASK_ID`.
+
+### Added — what a concealed reply can and cannot do here, stated and anchored (W2185, W2187)
+
+The README now records this plugin's position on the fleet's stdout-preservation curl guard: a concealed reply cannot empty the snapshot, because `capture.ts` shells `git` itself and the PUT goes out on the plugin's own `fetch()`, but it could send it to the wrong task. That section carries the canon anchor and its back-reference, and since D309 it says the identifier case is closed and names the two shapes that still reach the cache — a shell-expanded id and a literal segment in neither accepted form.
+
+### Added — a release runbook for this repository (W2173)
+
+`RELEASE.md` records how this repository is released, as its own history shows it: which file holds the version, the changelog's shape (and that it has changed over time), that there is no catalog to sync, and the one-line check for whether the changelog's top heading is already tagged. Documentation only.
+
 ## [1.38.0] - 2026-09-07
 
 ### Added — a back-reference beside every anchored rule (W2137)
