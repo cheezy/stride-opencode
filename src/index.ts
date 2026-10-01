@@ -85,19 +85,25 @@ const CLAIM_PATTERN = /\/api\/tasks\/claim/;
 const COMPLETE_PATTERN = /\/api\/tasks\/[^/]+\/complete/;
 const MARK_REVIEWED_PATTERN = /\/api\/tasks\/[^/]+\/mark_reviewed/;
 
-// (D127) Extract the authoritative numeric task id from a /complete or
+// (D127, D309) Extract the authoritative task id from a /complete or
 // /mark_reviewed command URL. The after_doing finalize and before_review
 // self-heal paths always process such a command, whose URL carries the real
 // task id — preferring it over the env-cache TASK_ID guards against a stale or
 // corrupt cache targeting the changed_files PUT at the wrong (previous) task.
-// Pure string parse, no network call. Mirrors task_id_from_command in
-// stride/hooks/stride-hook.sh: only a bare numeric id is accepted; a claim/next
-// URL or a non-numeric segment yields null (the caller then falls back to the
-// env-cache id). The capturing, digit-only regex is intentionally distinct from
-// the structural COMPLETE_PATTERN / MARK_REVIEWED_PATTERN above, which route on
-// shape (any segment) rather than identity.
+// Pure string parse, no network call. Two id forms are accepted, the two the
+// server resolves: a numeric database id, or a task identifier (G/W/D plus
+// digits, e.g. W2185). Before D309 only the numeric form was read, so an
+// identifier URL fell through to the env cache — stale whenever the claim
+// response was concealed — and the diff went to the previous task with no
+// error. A claim/next URL or any other segment still yields null (the caller
+// then falls back to the env-cache id). The closed class is what makes the
+// captured id safe to interpolate into the changed_files PUT path: no slash,
+// dot, percent, query or fragment can enter it. This capturing regex is
+// intentionally distinct from the structural COMPLETE_PATTERN /
+// MARK_REVIEWED_PATTERN above, which route on shape (any segment) rather than
+// identity.
 const TASK_ID_FROM_COMMAND_PATTERN =
-  /\/api\/tasks\/(\d+)\/(?:complete|mark_reviewed)/;
+  /\/api\/tasks\/(\d+|[GWD]\d+)\/(?:complete|mark_reviewed)/;
 
 export function taskIdFromCommand(command: string): string | null {
   const match = TASK_ID_FROM_COMMAND_PATTERN.exec(command);

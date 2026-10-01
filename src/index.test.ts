@@ -284,10 +284,69 @@ describe("taskIdFromCommand", () => {
     ).toBeNull();
   });
 
-  it("returns null for a non-numeric id segment", () => {
+  it("returns null for a segment that is neither numeric nor an identifier", () => {
     expect(
       taskIdFromCommand("curl -X PATCH https://stride.dev/api/tasks/abc/complete"),
     ).toBeNull();
+    for (const seg of ["w999", "X12", "W", "W12x", "W..", "..%2fW1", "W1%2f2"]) {
+      expect(
+        taskIdFromCommand(`curl -X PATCH https://stride.dev/api/tasks/${seg}/complete`),
+      ).toBeNull();
+    }
+  });
+
+  it("D309: extracts an identifier-form id from a /complete command URL", () => {
+    expect(
+      taskIdFromCommand(
+        "curl -X PATCH https://stride.dev/api/tasks/W2185/complete -d '{}'",
+      ),
+    ).toBe("W2185");
+  });
+
+  it("D309: extracts goal and defect identifiers from /mark_reviewed and /complete", () => {
+    expect(
+      taskIdFromCommand("curl -X PATCH https://stride.dev/api/tasks/G42/mark_reviewed"),
+    ).toBe("G42");
+    expect(
+      taskIdFromCommand(
+        "curl -X PATCH 'https://stride.dev/api/tasks/D309/complete?response_view=slim'",
+      ),
+    ).toBe("D309");
+  });
+
+  it("D309: extracts the identifier whatever the response concealment", () => {
+    const url = "https://stride.dev/api/tasks/W2185/complete";
+    for (const cmd of [
+      `curl -X PATCH ${url}`,
+      `curl -X PATCH ${url} -o /tmp/out.json`,
+      `curl -X PATCH ${url} > /tmp/out.json`,
+      `curl -X PATCH ${url} | jq .data`,
+      `curl -X PATCH ${url} | tee .stride/.last-api-response.json`,
+    ]) {
+      expect(taskIdFromCommand(cmd)).toBe("W2185");
+    }
+  });
+
+  it("D309: extracts the numeric id whatever the response concealment", () => {
+    // The numeric path must behave exactly as before in every concealment form.
+    const url = "https://stride.dev/api/tasks/1640/complete";
+    for (const cmd of [
+      `curl -X PATCH ${url}`,
+      `curl -X PATCH ${url} -o /tmp/out.json`,
+      `curl -X PATCH ${url} > /tmp/out.json`,
+      `curl -X PATCH ${url} | jq .data`,
+      `curl -X PATCH ${url} | tee .stride/.last-api-response.json`,
+    ]) {
+      expect(taskIdFromCommand(cmd)).toBe("1640");
+    }
+  });
+
+  it("D309: captures only the id segment, never the surrounding command", () => {
+    expect(
+      taskIdFromCommand(
+        'curl -H "Authorization: Bearer tok_secret" https://stride.dev/api/tasks/W7/complete',
+      ),
+    ).toBe("W7");
   });
 
   it("returns null for a non-Stride command", () => {
@@ -795,6 +854,61 @@ describe("StridePlugin — W1093 early capture + W1094 self-heal", () => {
       expect(putCalls[0]).not.toContain("/api/tasks/41/");
       const state = readFileSync(join(dir, ".stride-diff-upload-state"), "utf8");
       expect(state).toMatch(/^task_id=42\nhttp_code=200\nbase=[0-9a-f]{40}\n$/);
+    } finally {
+      cleanup(dir);
+    }
+  });
+
+  // D309: the same stale claim, but the completion URL spells the task by
+  // identifier. The server resolves /api/tasks/W42/complete, so the diff must
+  // follow the URL rather than fall through to the stale env id.
+  const IDENTIFIER_COMPLETE_CMD =
+    'curl -X PATCH http://localhost/api/tasks/W42/complete -H "Authorization: Bearer tok"';
+
+  it("D309: after_doing finalize PUT targets an identifier-form /complete URL, not a stale env TASK_ID", async () => {
+    const dir = await initRepo();
+    try {
+      const hooks = await instantiate(dir);
+      await hooks["tool.execute.after"]({ input: { command: CLAIM_CMD } }, STALE_CLAIM_RESPONSE);
+      putCalls = [];
+      writeFileSync(join(dir, ".stride.md"), "## after_doing\n\n```bash\n```\n");
+      await hooks["tool.execute.before"]({ input: { command: IDENTIFIER_COMPLETE_CMD } });
+      expect(putCalls.length).toBe(1);
+      expect(putCalls[0]).toContain("/api/tasks/W42/changed_files");
+      expect(putCalls[0]).not.toContain("/api/tasks/41/");
+      const state = readFileSync(join(dir, ".stride-diff-upload-state"), "utf8");
+      expect(state).toMatch(/^task_id=W42\nhttp_code=200\nbase=[0-9a-f]{40}\n$/);
+    } finally {
+      cleanup(dir);
+    }
+  });
+
+  it("D309: before_review self-heal PUT targets an identifier-form /complete URL, not a stale env TASK_ID", async () => {
+    const dir = await initRepo();
+    try {
+      const hooks = await instantiate(dir);
+      await hooks["tool.execute.after"]({ input: { command: CLAIM_CMD } }, STALE_CLAIM_RESPONSE);
+      putCalls = [];
+      await hooks["tool.execute.after"]({ input: { command: IDENTIFIER_COMPLETE_CMD } }, "");
+      expect(putCalls.length).toBe(1);
+      expect(putCalls[0]).toContain("/api/tasks/W42/changed_files");
+      expect(putCalls[0]).not.toContain("/api/tasks/41/");
+      const state = readFileSync(join(dir, ".stride-diff-upload-state"), "utf8");
+      expect(state).toMatch(/^task_id=W42\nhttp_code=200\nbase=[0-9a-f]{40}\n$/);
+    } finally {
+      cleanup(dir);
+    }
+  });
+
+  it("D309: an identifier-form /complete URL uploads even with no claim in the env cache at all", async () => {
+    const dir = await initRepo();
+    try {
+      const hooks = await instantiate(dir);
+      putCalls = [];
+      writeFileSync(join(dir, ".stride.md"), "## after_doing\n\n```bash\n```\n");
+      await hooks["tool.execute.before"]({ input: { command: IDENTIFIER_COMPLETE_CMD } });
+      expect(putCalls.length).toBe(1);
+      expect(putCalls[0]).toContain("/api/tasks/W42/changed_files");
     } finally {
       cleanup(dir);
     }
