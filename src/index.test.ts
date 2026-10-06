@@ -43,6 +43,13 @@ import {
   StridePlugin,
 } from "./index";
 
+// (W2302) Every plugin instance in this file would otherwise start the
+// stale-install lookup at init. Several suites here stub globalThis.fetch and
+// assert it is never called, and no test may reach the real network, so the
+// lookup is switched off for this file. src/version-check.test.ts turns it back
+// on, with an injected fetch, for the tests that exercise it.
+process.env.STRIDE_OPENCODE_VERSION_CHECK = "0";
+
 // --- parseStrideMd tests ---
 
 describe("parseStrideMd", () => {

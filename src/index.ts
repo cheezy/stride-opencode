@@ -33,6 +33,11 @@ import {
   completedAtNow,
 } from "./capture";
 import { writeTaskFile, removeTaskFile } from "./task-file";
+import {
+  checkPluginCurrent,
+  versionCheckEnabled,
+  type PackageJsonReader,
+} from "./version-check";
 
 // Re-export parser functions for backwards compatibility
 export { parseStrideMd, buildCommandList, buildCommandList as filterCommands, type HookName } from "./parser";
@@ -273,6 +278,28 @@ export function extractToolArgs(input: unknown, output: unknown): unknown {
     (output as { args?: unknown })?.args ??
     (input as { input?: unknown })?.input ??
     undefined
+  );
+}
+
+// (W2302) Any call to the Stride API, not only the three that fire hooks:
+// /api/tasks/* (next, claim, complete, PATCH, batch, unclaim, after_goal, ...)
+// and /api/agent/*. The command is read from the nested `.input` shape and from
+// the SDK's declared `args`, since hosts differ on which one they fill.
+const STRIDE_API_CALL_PATTERN = /\/api\/(?:tasks|agent)\b/;
+
+export function isStrideApiCall(toolInput: unknown): boolean {
+  const args = (toolInput as { args?: { command?: unknown } } | undefined)?.args;
+  const fromArgs = typeof args?.command === "string" ? args.command : "";
+  const command = extractCommand(toolInput) || fromArgs;
+  return STRIDE_API_CALL_PATTERN.test(command);
+}
+
+/** True when a tool result carries plain text the notice can be appended to. */
+export function hasTextOutput(toolOutput: unknown): toolOutput is { output: string } {
+  return (
+    typeof toolOutput === "object" &&
+    toolOutput !== null &&
+    typeof (toolOutput as { output?: unknown }).output === "string"
   );
 }
 
@@ -527,6 +554,14 @@ export const StridePlugin: Plugin = async (input) => {
   const { hookTimeoutsMs, killGraceMs } = input as unknown as {
     hookTimeoutsMs?: Partial<Record<HookName, number>>;
     killGraceMs?: number;
+  };
+  // (W2302) Test-only injection for the stale-install notice, same cast.
+  const { versionCheck } = input as unknown as {
+    versionCheck?: {
+      fetch?: typeof globalThis.fetch;
+      readPackageJson?: PackageJsonReader;
+      timeoutMs?: number;
+    };
   };
   const projectDir = worktree || directory;
   let envCache: EnvCache = {};
@@ -830,6 +865,58 @@ export const StridePlugin: Plugin = async (input) => {
   const advisoryInFlight = new Set<string>();
   const advisoryMemCounts = new Map<string, number>();
 
+  // (W2302) Stale-install notice, once per plugin instance (one OpenCode run).
+  //
+  // The lookup starts here and is never awaited: session start and every tool
+  // call proceed at full speed whether or not GitHub answers. When it settles
+  // with a line, the first ordinary tool result after that carries it, and the
+  // flag makes sure no later one does. No Stride API reply is ever used as the
+  // carrier -- this plugin and the agent both parse those as JSON. "Once" is
+  // per OpenCode process, so the carrier can be a subagent's tool result.
+  let versionNotice: string | null = null;
+  let versionNoticeSettled = false;
+  let versionNoticeDone = false;
+  try {
+    if (versionCheckEnabled(process.env)) {
+      checkPluginCurrent({
+        fetch:
+          versionCheck?.fetch ??
+          (((...args: Parameters<typeof globalThis.fetch>) =>
+            globalThis.fetch(...args)) as typeof globalThis.fetch),
+        readPackageJson: versionCheck?.readPackageJson,
+        timeoutMs: versionCheck?.timeoutMs,
+      }).then(
+        (line) => {
+          versionNotice = line;
+          versionNoticeSettled = true;
+        },
+        () => {
+          versionNoticeSettled = true;
+        },
+      );
+    } else {
+      versionNoticeDone = true;
+    }
+  } catch {
+    versionNoticeDone = true;
+  }
+
+  function deliverVersionNotice(toolInput: unknown, toolOutput: unknown): void {
+    try {
+      if (versionNoticeDone || !versionNoticeSettled) return;
+      if (versionNotice === null) {
+        versionNoticeDone = true;
+        return;
+      }
+      // Not a usable carrier: wait for the next tool result, flag unspent.
+      if (isStrideApiCall(toolInput) || !hasTextOutput(toolOutput)) return;
+      toolOutput.output = `${toolOutput.output}\n\n${versionNotice}`;
+      versionNoticeDone = true;
+    } catch {
+      // Advisory only: a failure here must never touch the tool call.
+    }
+  }
+
   return {
     // (W2152) Loop continuation — advisory, OFF unless STRIDE_OPENCODE_ADVISORY
     // is explicitly enabled.
@@ -965,6 +1052,8 @@ export const StridePlugin: Plugin = async (input) => {
     },
 
     "tool.execute.after": async (input, output) => {
+      deliverVersionNotice(input, output);
+
       const command = extractCommand(input);
       if (!command) return;
 

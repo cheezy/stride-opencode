@@ -36,6 +36,8 @@ git clone https://github.com/cheezy/stride-opencode.git .opencode/plugins/stride
 git clone https://github.com/cheezy/stride-opencode.git ~/.config/opencode/plugins/stride-opencode
 ```
 
+Once installed, the plugin tells you when a newer release exists — see [Plugin update notice](#plugin-update-notice) below.
+
 ### Step 2 — Install the skills and subagents (for the workflow itself)
 
 **Important:** OpenCode does NOT auto-discover skills or agents from inside an installed plugin. They must live on disk at the documented paths below, regardless of whether the plugin is installed via `github:` or locally.
@@ -345,6 +347,18 @@ So when enabled this **starts a new turn**; it does not stop an old one from end
 **Enabling this authorises an open-ended loop, not a single nudge.** The budget bounds one *unfollowed completion*: a successful claim resets it, so each advisory that works leads to a claim, which re-arms the budget for the next task. With the flag on, an agent can therefore work an entire queue turn after turn with nobody watching, and the pacing is set by whatever `GET /api/tasks/next` keeps returning. That is the feature's purpose rather than a defect, but it is the thing you are switching on, so it is stated here rather than left to be discovered.
 
 **Known rough edge.** `session.idle` fires on *every* turn completion, ordinary ones included; the guards above are the only thing distinguishing an abandoned Stride loop from an idle session. And because the event fires the moment the turn ends, a re-prompt can land while you are composing your next message. The prompt says outright that it was generated automatically, so it is identifiable when it does.
+
+### Plugin update notice
+
+An outdated install keeps running old code with no visible sign: Bun installs the plugin once and OpenCode reuses that cached copy, so fixes published later never reach you until you update. To make that visible, the plugin checks once per OpenCode run whether a newer release exists.
+
+- **What it compares.** The `version` field of the installed plugin's own `package.json` against the `tag_name` of the latest GitHub release of `cheezy/stride-opencode` (one unauthenticated request to the GitHub releases API, carrying no project data, abandoned after 3 seconds). Both values must be plain `MAJOR.MINOR.PATCH`; they are compared number by number, so `1.10.0` is newer than `1.9.0`.
+- **When it speaks.** Only when the installed version is strictly older. It then adds one line, starting `[stride-opencode] Plugin update available`, to the end of one ordinary tool result, naming both versions and how to update. The `stride-workflow` skill tells the agent to pass that line on to you once and carry on. It is never attached to the output of a Stride API call (anything under `/api/tasks` or `/api/agent`), and it never appears twice in one run. "Once" is per OpenCode process rather than per session, so when a subagent's tool call happens to come first, the line lands in that subagent's result instead of the main conversation.
+- **When it stays silent.** The install is current or newer (a local development checkout), the machine is offline, GitHub rate-limits the request or answers with an error, the lookup times out, either version is not a plain numeric version, or the installed `package.json` cannot be read. None of these produces an error.
+- **It never blocks.** The lookup runs in the background from plugin start-up; no session, tool call or task claim waits for it.
+- **What it covers.** The plugin package only. The `skills/` and `agents/` you copied in Step 2 carry no version marker, so the notice cannot tell whether those copies are current — refresh them whenever you update the plugin.
+- **How to update.** Pin the release it names in `opencode.json` (`"github:cheezy/stride-opencode#vX.Y.Z"`), or remove the cached copy from OpenCode's cache under `~/.cache/opencode/` so the unpinned reference installs afresh, then restart OpenCode and repeat Step 2 from the same release. If you pinned an older release on purpose, the notice appears once per run as a reminder.
+- **Turning it off.** Set `STRIDE_OPENCODE_VERSION_CHECK=0` (also `false`, `off` or `no`) in the environment OpenCode starts from.
 
 ### `.stride.md` parser rules
 
