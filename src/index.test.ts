@@ -1,5 +1,18 @@
 import { describe, expect, it, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync, existsSync, readFileSync, mkdirSync } from "node:fs";
+import {
+  mkdtempSync,
+  rmSync,
+  writeFileSync,
+  existsSync,
+  readFileSync,
+  mkdirSync,
+  readdirSync,
+  linkSync,
+  chmodSync,
+  statSync,
+  symlinkSync,
+  lstatSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { $ } from "bun";
@@ -23,6 +36,10 @@ import {
   loopStateFieldsFrom,
   canonicalBelongsToCompletion,
   extractSessionId,
+  taskDataFrom,
+  taskFileStem,
+  writeTaskFile,
+  removeTaskFile,
   StridePlugin,
 } from "./index";
 
@@ -3160,6 +3177,477 @@ describe("StridePlugin — W2150 loop-state record", () => {
     } finally {
       cleanup(dir);
     }
+  });
+});
+
+// --- W2300: the claimed task file (.stride/.task-<stem>.json) ---
+//
+// Port of stride W2248. Drives tool.execute.after with claim and completion
+// bodies exactly as the W2150 loop-state tests do; fetch is stubbed so nothing
+// reaches the network.
+
+describe("StridePlugin — W2300 claimed task file", () => {
+  const originalFetch = globalThis.fetch;
+
+  beforeEach(() => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (globalThis as any).fetch = async () => new Response("", { status: 200 });
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  async function initRepo(): Promise<string> {
+    const dir = mkdtempSync(join(tmpdir(), "stride-oc-taskfile-"));
+    await $`git init -q`.cwd(dir).quiet();
+    await $`git config user.email "test@test.local"`.cwd(dir).quiet();
+    await $`git config user.name "Test"`.cwd(dir).quiet();
+    writeFileSync(join(dir, ".gitignore"), ".stride.md\n");
+    writeFileSync(join(dir, "tracked.txt"), "v1\n");
+    await $`git add .gitignore tracked.txt`.cwd(dir).quiet();
+    await $`git commit -q -m v1`.cwd(dir).quiet();
+    return dir;
+  }
+
+  function cleanup(dir: string): void {
+    try {
+      rmSync(dir, { recursive: true, force: true });
+    } catch {
+      /* best-effort */
+    }
+  }
+
+  async function instantiate(dir: string) {
+    const hooks = await StridePlugin({ directory: dir, worktree: dir, $ } as never);
+    return hooks as {
+      "tool.execute.after": (i: unknown, o?: unknown) => Promise<void>;
+    };
+  }
+
+  const CLAIM_CMD = "curl -X POST http://localhost/api/tasks/claim";
+  const completeCmd = (id: number | string) =>
+    `curl -X PATCH http://localhost/api/tasks/${id}/complete`;
+
+  function claimBody(data: unknown): string {
+    return JSON.stringify({ hook: { name: "before_doing" }, data });
+  }
+
+  function completeBody(data: unknown): string {
+    return JSON.stringify({ data, hooks: [] });
+  }
+
+  function taskFiles(dir: string): string[] {
+    const stride = join(dir, ".stride");
+    if (!existsSync(stride)) return [];
+    return readdirSync(stride)
+      .filter((f) => f.startsWith(".task-"))
+      .sort();
+  }
+
+  function tmpLeftovers(dir: string): string[] {
+    const stride = join(dir, ".stride");
+    if (!existsSync(stride)) return [];
+    return readdirSync(stride).filter((f) => /^task-file\..*\.tmp$/.test(f));
+  }
+
+  async function claim(
+    hooks: Awaited<ReturnType<typeof instantiate>>,
+    output: unknown,
+    command: string = CLAIM_CMD,
+  ): Promise<void> {
+    await hooks["tool.execute.after"]({ input: { command } }, output);
+  }
+
+  it("writes the claimed task file after a successful claim", async () => {
+    const dir = await initRepo();
+    try {
+      const hooks = await instantiate(dir);
+      // .stride/ does not exist yet — the write creates it.
+      expect(existsSync(join(dir, ".stride"))).toBe(false);
+      const data = { id: 123, identifier: "W123", title: "T", needs_review: false };
+      await claim(hooks, claimBody(data));
+      const file = join(dir, ".stride", ".task-W123.json");
+      expect(existsSync(file)).toBe(true);
+      expect(JSON.parse(readFileSync(file, "utf8"))).toEqual(data);
+
+      // A second claim for a different task writes its own file and leaves the
+      // first one in place.
+      await claim(hooks, claimBody({ id: 124, identifier: "W124" }));
+      expect(taskFiles(dir)).toEqual([".task-W123.json", ".task-W124.json"]);
+      expect(JSON.parse(readFileSync(file, "utf8"))).toEqual(data);
+
+      // Mixed case plus underscore and hyphen is a valid stem as-is.
+      await claim(hooks, claimBody({ id: 125, identifier: "Ab_c-9" }));
+      expect(existsSync(join(dir, ".stride", ".task-Ab_c-9.json"))).toBe(true);
+
+      // Re-claiming the same task replaces its file.
+      await claim(hooks, claimBody({ id: 123, identifier: "W123", title: "T2" }));
+      expect(JSON.parse(readFileSync(file, "utf8")).title).toBe("T2");
+    } finally {
+      cleanup(dir);
+    }
+
+    // Through the handler the canonical capture creates .stride/ first, so
+    // call the writer directly to prove IT creates a missing .stride/.
+    const bare = mkdtempSync(join(tmpdir(), "stride-oc-taskfile-bare-"));
+    try {
+      expect(existsSync(join(bare, ".stride"))).toBe(false);
+      expect(await writeTaskFile(bare, { id: 1, identifier: "W1" })).toBe("W1");
+      expect(JSON.parse(readFileSync(join(bare, ".stride", ".task-W1.json"), "utf8"))).toEqual({
+        id: 1,
+        identifier: "W1",
+      });
+    } finally {
+      cleanup(bare);
+    }
+  });
+
+  it("task file stem enforces the 64-character identifier bound", async () => {
+    const at64 = "W" + "1".repeat(63);
+    const at65 = "W" + "1".repeat(64);
+    expect(taskFileStem({ id: 77, identifier: at64 })).toBe(at64);
+    expect(taskFileStem({ id: 77, identifier: at65 })).toBe("77");
+
+    const dir = await initRepo();
+    try {
+      const hooks = await instantiate(dir);
+      await claim(hooks, claimBody({ id: 1, identifier: at64 }));
+      expect(taskFiles(dir)).toEqual([`.task-${at64}.json`]);
+    } finally {
+      cleanup(dir);
+    }
+
+    // Every hostile or out-of-bound identifier falls back to the integer id,
+    // and nothing is created outside .stride/.
+    const hostile: unknown[] = [at65, "../../x", "a/b", "W1.2", "", "W1\n", " W1", 123];
+    for (const identifier of hostile) {
+      const dir = await initRepo();
+      const marker = `w2300-escape-${Math.random().toString(36).slice(2, 10)}`;
+      try {
+        const hooks = await instantiate(dir);
+        await claim(hooks, claimBody({ id: 77, identifier, marker }));
+        expect(taskFiles(dir)).toEqual([".task-77.json"]);
+        expect(readdirSync(join(dir, ".stride")).some((f) => f.includes(marker))).toBe(false);
+        // The only JSON files .stride/ may hold are the task file and the
+        // canonical capture, and nothing new appears beside .stride/ — the
+        // places a `../`-built name would have resolved to.
+        expect(
+          readdirSync(join(dir, ".stride"))
+            .filter((f) => f.endsWith(".json"))
+            .sort(),
+        ).toEqual([".last-api-response.json", ".task-77.json"]);
+        expect(readdirSync(dir).filter((f) => f.endsWith(".json"))).toEqual([]);
+      } finally {
+        cleanup(dir);
+      }
+    }
+  });
+
+  it("does not write a task file for a failed or unparsable claim", async () => {
+    const good = claimBody({ id: 5, identifier: "W5", title: "kept" });
+    const failures: unknown[] = [
+      JSON.stringify({ error: "Task is not available to claim" }), // 409
+      JSON.stringify({ errors: { identifier: ["is invalid"] } }), // 422
+      JSON.stringify({ error: "boom", message: "internal" }), // 500
+      claimBody({ id: 99, identifier: "W99" }).slice(0, 40), // truncated
+      "curl: (7) Failed to connect", // plain text
+      undefined, // harness dropped the output
+      JSON.stringify({ data: [] }), // data that is not an object
+    ];
+    for (const output of failures) {
+      const dir = await initRepo();
+      try {
+        const hooks = await instantiate(dir);
+        await claim(hooks, good);
+        const before = readFileSync(join(dir, ".stride", ".task-W5.json"));
+        await claim(hooks, output);
+        expect(taskFiles(dir)).toEqual([".task-W5.json"]);
+        expect(readFileSync(join(dir, ".stride", ".task-W5.json"))).toEqual(before);
+      } finally {
+        cleanup(dir);
+      }
+    }
+
+    // (D226) A truncated claim must not fall back to the canonical file, which
+    // can still hold an earlier claim's complete body.
+    const dir = await initRepo();
+    try {
+      const hooks = await instantiate(dir);
+      mkdirSync(join(dir, ".stride"), { recursive: true });
+      writeFileSync(
+        join(dir, CANONICAL_RESPONSE_FILE),
+        claimBody({ id: 99, identifier: "W99" }),
+      );
+      await claim(hooks, claimBody({ id: 100, identifier: "W100" }).slice(0, 40));
+      expect(taskFiles(dir)).toEqual([]);
+    } finally {
+      cleanup(dir);
+    }
+  });
+
+  it("writes nothing when no safe stem exists", async () => {
+    const stemless: Record<string, unknown>[] = [
+      { title: "no identifier, no id" },
+      { identifier: "../x", id: -1 },
+      { identifier: "a/b", id: 1.5 },
+      { identifier: "W 1", id: "12a" },
+      { identifier: null, id: null },
+      { identifier: "x".repeat(65), id: "1".repeat(21) },
+    ];
+    for (const data of stemless) {
+      expect(taskFileStem(data)).toBeNull();
+      const dir = await initRepo();
+      try {
+        const hooks = await instantiate(dir);
+        await claim(hooks, claimBody(data)); // resolves, never throws
+        expect(taskFiles(dir)).toEqual([]);
+        expect(tmpLeftovers(dir)).toEqual([]);
+      } finally {
+        cleanup(dir);
+      }
+    }
+    // A digit-only string id is the last accepted fallback.
+    expect(taskFileStem({ identifier: "bad/id", id: "8675309" })).toBe("8675309");
+    expect(taskFileStem(null)).toBeNull();
+    expect(taskFileStem([{ identifier: "W1" }])).toBeNull();
+  });
+
+  it("task file write is atomic", async () => {
+    const dir = await initRepo();
+    try {
+      const hooks = await instantiate(dir);
+      const dest = join(dir, ".stride", ".task-W7.json");
+      const witness = join(dir, "witness.json");
+      await claim(hooks, claimBody({ id: 7, identifier: "W7", v: "old" }));
+      const oldBytes = readFileSync(dest, "utf8");
+      // A hard link shares the inode. A rename puts a NEW inode at `dest` and
+      // leaves the witness holding the old bytes; an in-place truncating write
+      // would change both.
+      linkSync(dest, witness);
+      await claim(hooks, claimBody({ id: 7, identifier: "W7", v: "new" }));
+      expect(JSON.parse(readFileSync(dest, "utf8")).v).toBe("new");
+      expect(readFileSync(witness, "utf8")).toBe(oldBytes);
+      expect(tmpLeftovers(dir)).toEqual([]);
+      expect(statSync(dest).mode & 0o777).toBe(0o600);
+    } finally {
+      cleanup(dir);
+    }
+
+    // The rename itself fails AFTER the temp file was written: the temp is
+    // cleaned up, the previous file is untouched, and nothing throws.
+    const dirR = await initRepo();
+    try {
+      const dest = join(dirR, ".stride", ".task-W6.json");
+      expect(await writeTaskFile(dirR, { id: 6, identifier: "W6", v: "old" })).toBe("W6");
+      const before = readFileSync(dest, "utf8");
+      let stagedSeen = false;
+      const failingRename = (from: string) => {
+        stagedSeen = existsSync(from) && readFileSync(from, "utf8").includes('"new"');
+        throw new Error("EXDEV: simulated rename failure");
+      };
+      expect(
+        await writeTaskFile(dirR, { id: 6, identifier: "W6", v: "new" }, failingRename),
+      ).toBeNull();
+      expect(stagedSeen).toBe(true);
+      expect(readFileSync(dest, "utf8")).toBe(before);
+      expect(tmpLeftovers(dirR)).toEqual([]);
+    } finally {
+      cleanup(dirR);
+    }
+
+    // A directory squatting on the destination is refused, not written into.
+    const dir2 = await initRepo();
+    try {
+      const hooks = await instantiate(dir2);
+      mkdirSync(join(dir2, ".stride", ".task-W8.json"), { recursive: true });
+      await claim(hooks, claimBody({ id: 8, identifier: "W8" }));
+      expect(statSync(join(dir2, ".stride", ".task-W8.json")).isDirectory()).toBe(true);
+      expect(tmpLeftovers(dir2)).toEqual([]);
+    } finally {
+      cleanup(dir2);
+    }
+
+    // An unwritable .stride/: the staging write fails, the old file survives
+    // intact, nothing is left behind, and the handler still resolves. Root
+    // ignores the mode bits, so the check is meaningless there.
+    const isRoot = typeof process.getuid === "function" && process.getuid() === 0;
+    if (!isRoot) {
+      const dir3 = await initRepo();
+      try {
+        const hooks = await instantiate(dir3);
+        await claim(hooks, claimBody({ id: 9, identifier: "W9", v: "old" }));
+        const dest = join(dir3, ".stride", ".task-W9.json");
+        const before = readFileSync(dest, "utf8");
+        chmodSync(join(dir3, ".stride"), 0o500);
+        await claim(hooks, claimBody({ id: 9, identifier: "W9", v: "new" }));
+        expect(readFileSync(dest, "utf8")).toBe(before);
+        expect(tmpLeftovers(dir3)).toEqual([]);
+      } finally {
+        try {
+          chmodSync(join(dir3, ".stride"), 0o700);
+        } catch {
+          /* best-effort */
+        }
+        cleanup(dir3);
+      }
+    }
+  });
+
+  it("task file lifetime spans claim to successful completion", async () => {
+    const dir = await initRepo();
+    try {
+      const hooks = await instantiate(dir);
+      const file = join(dir, ".stride", ".task-W42.json");
+      await claim(hooks, claimBody({ id: 42, identifier: "W42", needs_review: false }));
+      expect(existsSync(file)).toBe(true);
+
+      // Unproven completions leave it alone: a 422, a truncated body (the
+      // canonical file still holds the CLAIM, which is not this completion),
+      // and no body at all.
+      const unproven: unknown[] = [
+        JSON.stringify({ errors: { completion_summary: ["can't be blank"] } }),
+        completeBody({ id: 42, identifier: "W42", needs_review: false }).slice(0, 40),
+        undefined,
+      ];
+      for (const output of unproven) {
+        await hooks["tool.execute.after"](
+          { sessionID: "ses_abc", input: { command: completeCmd(42) } },
+          output,
+        );
+        expect(existsSync(file)).toBe(true);
+      }
+
+      await hooks["tool.execute.after"](
+        { sessionID: "ses_abc", input: { command: completeCmd(42) } },
+        completeBody({ id: 42, identifier: "W42", needs_review: false }),
+      );
+      expect(existsSync(file)).toBe(false);
+    } finally {
+      cleanup(dir);
+    }
+
+    // A truncated completion whose canonical file is proven to be THIS
+    // completion (the guarded Tier 2) also counts as proven.
+    const dirT = await initRepo();
+    try {
+      const hooks = await instantiate(dirT);
+      await claim(hooks, claimBody({ id: 42, identifier: "W42", needs_review: false }));
+      const full = completeBody({ id: 42, identifier: "W42", needs_review: true });
+      writeFileSync(join(dirT, CANONICAL_RESPONSE_FILE), full);
+      await hooks["tool.execute.after"](
+        { sessionID: "ses_abc", input: { command: completeCmd(42) } },
+        full.slice(0, 40),
+      );
+      expect(taskFiles(dirT)).toEqual([]);
+    } finally {
+      cleanup(dirT);
+    }
+
+    // A file named after the numeric id is found again from the completion's
+    // own `.data` and removed.
+    const dirN = await initRepo();
+    try {
+      const hooks = await instantiate(dirN);
+      await claim(hooks, claimBody({ id: 77, identifier: "W.77", needs_review: false }));
+      expect(taskFiles(dirN)).toEqual([".task-77.json"]);
+      await hooks["tool.execute.after"](
+        { sessionID: "ses_abc", input: { command: completeCmd(77) } },
+        completeBody({ id: 77, identifier: "W.77", needs_review: false }),
+      );
+      expect(taskFiles(dirN)).toEqual([]);
+    } finally {
+      cleanup(dirN);
+    }
+
+    // Completing one task removes only that task's file.
+    const dir2 = await initRepo();
+    try {
+      const hooks = await instantiate(dir2);
+      await claim(hooks, claimBody({ id: 1, identifier: "W1", needs_review: false }));
+      await claim(hooks, claimBody({ id: 2, identifier: "W2", needs_review: false }));
+      await hooks["tool.execute.after"](
+        { sessionID: "ses_abc", input: { command: completeCmd(1) } },
+        completeBody({ id: 1, identifier: "W1", needs_review: false }),
+      );
+      expect(taskFiles(dir2)).toEqual([".task-W2.json"]);
+    } finally {
+      cleanup(dir2);
+    }
+
+    // The remover unlinks a symlink itself (never its target), leaves a
+    // directory in place, and treats a missing file or a stemless object as a
+    // no-op — none of which throws.
+    const dirX = await initRepo();
+    try {
+      const stride = join(dirX, ".stride");
+      mkdirSync(stride, { recursive: true });
+      const target = join(dirX, "target.json");
+      writeFileSync(target, "{}\n");
+      symlinkSync(target, join(stride, ".task-W10.json"));
+      await removeTaskFile(dirX, { id: 10, identifier: "W10" });
+      expect(() => lstatSync(join(stride, ".task-W10.json"))).toThrow();
+      expect(readFileSync(target, "utf8")).toBe("{}\n");
+
+      mkdirSync(join(stride, ".task-W11.json"));
+      await removeTaskFile(dirX, { id: 11, identifier: "W11" });
+      expect(statSync(join(stride, ".task-W11.json")).isDirectory()).toBe(true);
+
+      await removeTaskFile(dirX, { id: 12, identifier: "W12" });
+      await removeTaskFile(dirX, { title: "no stem" });
+      await removeTaskFile(dirX, null);
+    } finally {
+      cleanup(dirX);
+    }
+  });
+
+  it("task file content equals the claim data object", async () => {
+    const data = {
+      id: 3,
+      identifier: "W3",
+      title: "Ünïcödé — task ✓",
+      acceptance_criteria: "line one\nline two",
+      key_files: [{ file_path: "src/a.ts", note: null, position: 0 }],
+      testing_strategy: { unit_tests: ["a", "b"], edge_cases: [] },
+      technical_details: {},
+      reviewer_result: null,
+      needs_review: false,
+    };
+    const dir = await initRepo();
+    try {
+      const hooks = await instantiate(dir);
+      await claim(
+        hooks,
+        claimBody(data),
+        'curl -X POST http://localhost/api/tasks/claim -H "Authorization: Bearer secret-tok"',
+      );
+      const raw = readFileSync(join(dir, ".stride", ".task-W3.json"), "utf8");
+      const parsed = JSON.parse(raw);
+      expect(parsed).toEqual(data);
+      expect(raw).toBe(JSON.stringify(data) + "\n");
+      expect(Object.keys(parsed)).not.toContain("hook");
+      expect(Object.keys(parsed)).not.toContain("data");
+      expect(raw).not.toContain("secret-tok");
+      expect(raw).not.toMatch(/Bearer/);
+    } finally {
+      cleanup(dir);
+    }
+
+    // The Bash-tool {stdout: "<json>"} wrapper yields the same file.
+    const dir2 = await initRepo();
+    try {
+      const hooks = await instantiate(dir2);
+      await claim(hooks, JSON.stringify({ stdout: claimBody(data), stderr: "" }));
+      const raw = readFileSync(join(dir2, ".stride", ".task-W3.json"), "utf8");
+      expect(raw).toBe(JSON.stringify(data) + "\n");
+    } finally {
+      cleanup(dir2);
+    }
+
+    // taskDataFrom reads only `.data`, never the bare root.
+    expect(taskDataFrom(claimBody(data))).toEqual(data);
+    expect(taskDataFrom(JSON.stringify(data))).toBeNull();
+    expect(taskDataFrom("")).toBeNull();
   });
 });
 

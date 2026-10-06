@@ -32,6 +32,7 @@ import {
   loopStateSafe,
   completedAtNow,
 } from "./capture";
+import { writeTaskFile, removeTaskFile } from "./task-file";
 
 // Re-export parser functions for backwards compatibility
 export { parseStrideMd, buildCommandList, buildCommandList as filterCommands, type HookName } from "./parser";
@@ -78,6 +79,14 @@ export {
   type CommandOutput,
   type ExecOptions,
 } from "./hook-exec";
+export {
+  writeTaskFile,
+  removeTaskFile,
+  taskFileStem,
+  taskFilePath,
+  TASK_FILE_IDENTIFIER,
+  TASK_FILE_STRING_ID,
+} from "./task-file";
 
 // --- Stride API call detection ---
 
@@ -137,6 +146,26 @@ export function loopStateFieldsFrom(
   if (typeof identifier !== "string" || identifier.length === 0) return null;
   if (typeof needsReview !== "boolean") return null; // stringified -> no write
   return { identifier, needsReview };
+}
+
+/**
+ * (W2300) The `.data` object of a response body, or null. Success is read from
+ * the body because the handler never sees an HTTP status: every claim or
+ * completion failure the API returns (409, 422, 500) carries `error`/`errors`
+ * and no `data`, and a truncated body does not parse. Unlike
+ * extractEnvFromResponse this never falls back to the bare root and never
+ * coerces a field, so what it returns is the object exactly as the server sent
+ * it. Never throws.
+ */
+export function taskDataFrom(
+  raw: string | null | undefined,
+): Record<string, unknown> | null {
+  if (!raw) return null;
+  const root = peelPayloadRoot(raw);
+  if (!root) return null;
+  const data = root.data;
+  if (!data || typeof data !== "object" || Array.isArray(data)) return null;
+  return data as Record<string, unknown>;
 }
 
 /**
@@ -1006,6 +1035,19 @@ export const StridePlugin: Plugin = async (input) => {
         if (envExtracted) {
           await writeEnvCache(projectDir, envCache);
         }
+        // (W2300) Save the claimed task to .stride/.task-<stem>.json. The data
+        // comes from THIS call's own output and never from `responseText`:
+        // that view is canonical-file-first, and the canonical file outlives
+        // the call, so a truncated claim would otherwise save the PREVIOUS
+        // task under its name (the D226 trap). A body that does not parse, or
+        // carries no `.data` object, saves nothing. A failed save is announced
+        // by writeTaskFile and never fails the claim.
+        try {
+          const claimed = taskDataFrom(coerceOutputText(output));
+          if (claimed) await writeTaskFile(projectDir, claimed);
+        } catch {
+          // Never fatal: coerceOutputText can throw on a cyclic host object.
+        }
       }
 
       // (W1094) Changed-files upload self-heal — runs on the FRESH before_review
@@ -1027,11 +1069,13 @@ export const StridePlugin: Plugin = async (input) => {
           // survives across calls, so on a truncated or 422 completion it still
           // holds the previous CLAIM payload — which carries both fields and
           // would record a completion that never happened (D226).
-          let fields = loopStateFieldsFrom(coerceOutputText(output));
+          let fieldsSource = coerceOutputText(output);
+          let fields = loopStateFieldsFrom(fieldsSource);
           if (
             !fields &&
             canonicalBelongsToCompletion(responseText, taskIdFromCommand(command))
           ) {
+            fieldsSource = responseText;
             fields = loopStateFieldsFrom(responseText); // Tier 2, guarded
           }
           if (!fields && isUnparsableBody(coerceOutputText(output))) {
@@ -1050,6 +1094,14 @@ export const StridePlugin: Plugin = async (input) => {
               session_id: loopStateSafe(sid) ? sid : "unknown",
             });
           }
+          // (W2300) A proven completion ends the claimed task file's useful
+          // life. `fields` is non-null only for a body that proved success
+          // (Tier 1) or a canonical file proven to be THIS completion (Tier 2),
+          // so a 422, a truncated body or an unparsable one deletes nothing.
+          // The stem is re-derived from the same `.data` with the same rule the
+          // write used — not gated on loopStateSafe, a different charset — so a
+          // file named after the numeric id is found too.
+          if (fields) await removeTaskFile(projectDir, taskDataFrom(fieldsSource));
         } catch {
           // Never fatal to the already-succeeded /complete. coerceOutputText
           // JSON.stringify's a host-supplied object and can throw on a cycle.
