@@ -6,7 +6,8 @@
  * so a later workflow step can read the task's fields from disk rather than
  * have them retyped. A copy made by the plugin cannot drift from the server's
  * record; a paraphrased copy can. This module only writes and removes the
- * file — no skill or agent in this port reads it yet.
+ * file; the workflow skills hand its path to the explorer and reviewer agents
+ * as `TASK_FILE` (W2301), and those agents are what read it.
  *
  * Two rules keep the file safe to have on disk:
  *
