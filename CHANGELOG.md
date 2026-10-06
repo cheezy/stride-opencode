@@ -24,6 +24,28 @@ Why accepted rather than backfilled:
 
 The audit also found **zero** GitHub releases without a matching tag, so the record is incomplete in only this one direction.
 
+## [1.40.0] - 2026-10-05
+
+### Added — the claimed task is saved to `.stride/.task-<IDENTIFIER>.json` (W2300)
+
+A successful claim now writes the response's `data` object to `.stride/.task-<IDENTIFIER>.json`, atomically (a temp file in `.stride/` plus a rename). It reads only that call's own output, never the canonical capture (D226). The file is named for the identifier when the identifier fully matches `^[A-Za-z0-9_-]{1,64}$`, otherwise for the integer id, otherwise nothing is written. A proven successful completion deletes the file; a 422, truncated or unparsable completion leaves it. The README documents the file, its lifetime and the `.gitignore` advice. Port of stride W2248.
+
+### Added — the explorer and reviewer read the saved task as `TASK_FILE` (W2301)
+
+Step 3 Branch C and Step 6 of `stride-workflow`, and Phases 1 and 3 of `stride-subagent-workflow`, now pass the saved task as `TASK_FILE` once a one-word identity check prints `match`, and keep the inline field lists as the fallback. The `task-explorer` and `task-reviewer` agents accept `TASK_FILE`, check that its identifier names the task, report a `task_file:` line when they cannot use it, and the reviewer counts only non-blank acceptance-criterion lines. A bun test lifts the identity check out of the skill and pins each verdict. Port of stride W2249.
+
+### Added — a once-per-run notice when the installed plugin is out of date (W2302)
+
+`src/version-check.ts` reads the installed `package.json` version, fetches the latest GitHub release tag within a 3-second bound, and compares strictly numeric versions part by part. Only when the install is older does it produce one advisory line, which the plugin appends once to the first ordinary tool result, never to a Stride API reply. The lookup starts at init without being awaited and is silent on any failure. `stride-workflow` Step 0 item 4 tells the agent to relay the line once and carry on. Set `STRIDE_OPENCODE_VERSION_CHECK=0` to turn it off.
+
+### Changed — review round two must be earned (review-round-cap v2, W2303)
+
+Round two of the task review now needs a trigger: round one's fixes touched a code path, or round one reported a `critical` or a `category: "security"` issue. With none of these, each fixed finding is recorded by severity, category and `file:line` instead of being re-reviewed, and round one's result is submitted. The code-path test is defined in prose, and in this port the triggers are followed rather than enforced. `task-reviewer`, `stride-subagent-workflow` and `stride-completing-tasks` mirror the rule, and the canon anchor is now `review-round-cap v2`. Port of stride W2252.
+
+### Changed — Step 3 says the explorer call blocks on OpenCode (W2304)
+
+OpenCode's task tool (opencode 1.16.2) returns only after the subagent finishes; background dispatch is an experimental opt-in this workflow does not use. So stride W2254's rule to read key files while the explorer runs is not ported. Instead, Step 3 Branch C and the `stride-subagent-workflow` Phase 1 mirror say there is nothing to overlap, and a bun test pins both sites.
+
 ## [1.39.0] - 2026-10-01
 
 ### Fixed — an identifier-form completion URL no longer routes the diff through a stale claim cache (D309)

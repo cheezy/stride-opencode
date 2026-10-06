@@ -24,7 +24,7 @@ Add the plugin to your project's `opencode.json` or global `~/.config/opencode/o
 
 OpenCode installs plugins automatically using **Bun** at startup, caching them under `~/.cache/opencode/node_modules/`. See [OpenCode's plugins docs](https://opencode.ai/docs/plugins/) for details.
 
-> **npm package status:** The `opencode-stride` npm package is not currently published. Use the `github:cheezy/stride-opencode` reference above. If you need pinning, add a ref: `github:cheezy/stride-opencode#v1.25.0` (branch, tag, or commit SHA). OpenCode's docs only document npm package names in `"plugin"`, but Bun resolves `github:owner/repo` references as npm-install targets, so this works.
+> **npm package status:** The `opencode-stride` npm package is not currently published. Use the `github:cheezy/stride-opencode` reference above. If you need pinning, add a ref: `github:cheezy/stride-opencode#v1.40.0` (branch, tag, or commit SHA). OpenCode's docs only document npm package names in `"plugin"`, but Bun resolves `github:owner/repo` references as npm-install targets, so this works.
 
 Alternatively, if you prefer not to auto-install, clone the repo into a local plugin directory:
 
