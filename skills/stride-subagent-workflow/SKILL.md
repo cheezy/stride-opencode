@@ -158,6 +158,8 @@ Without a match — no file, another task's file, an unusable identifier, or an 
 
 The explorer will return a structured summary of: each key file's current state, related test files, existing patterns found, and module APIs to reuse.
 
+**This invocation blocks:** OpenCode's `task` tool (opencode 1.16.2) returns only after the explorer has finished, so there is nothing to overlap — no reading or drafting happens while it runs. Background subagents are an experimental opt-in this workflow does not use; `stride-workflow` Step 3 Branch C names the source and the reason.
+
 **Use the explorer's output** to inform your implementation — don't discard it. It tells you what exists, what patterns to follow, and what utilities to reuse.
 
 ## Phase 2: Planning (Conditional, Before Coding)

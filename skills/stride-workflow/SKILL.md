@@ -326,7 +326,9 @@ Skip exploration, planning, and review. Proceed directly to Step 4 (Implementati
 
    **On any other word** — `absent` (an older plugin, a claim reply that was cut short, a save that failed), `mismatch` (the file belongs to another task), `unreadable`, or `invalid-id` — leave `TASK_FILE` out and pass `key_files`, `patterns_to_follow`, `where_context` and `testing_strategy` inline, exactly as before this contract. Do the same if the explorer opens its reply with a `task_file:` line saying it could not use the file: invoke it again with those four fields inline.
 
-   Wait for the result. Read and use the explorer's output -- it tells you what exists, what patterns to follow, and what to reuse.
+   Wait for the result. On this runtime that wait is unavoidable: in opencode 1.16.2 the `TaskTool` in `packages/opencode/src/tool/task.ts` hands back nothing until the subagent's session has finished, so the invocation holds your turn and there is nothing to overlap with it — no window for reading `key_files` or sketching an approach in parallel. Its `background: true` option exists only behind the experimental `OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS=true` flag, and that mode itself tells the parent to keep away from the files and topics the subagent is working on, so this workflow neither enables nor relies on it.
+
+   Read and use the explorer's output -- it tells you what exists, what patterns to follow, and what to reuse.
 
    **If custom agents are unavailable**, explore manually:
    - Read each file in `key_files` to understand current state
