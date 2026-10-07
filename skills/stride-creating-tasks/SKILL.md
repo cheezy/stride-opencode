@@ -116,7 +116,7 @@ Use BEFORE calling `POST /api/tasks` to create any Stride task or defect.
 
 - [ ] `estimated_files` - Helps set expectations: `"1-2"`, `"3-5"`, or `"5+"`
 - [ ] `required_capabilities` - Array of agent skills needed
-- [ ] `behaviour_test_matrix` - **OPTIONAL** array of behaviour/test rows; omitting it is always fine and never an empty pill — see [behaviour_test_matrix](#behaviour_test_matrix)
+- [ ] `behaviour_test_matrix` - **expected by default**: whenever `testing_strategy` lists a unit or integration test, author all seven categories; leave it out only when the task has no testable behaviour, and give the reason in its `description` — see [behaviour_test_matrix](#behaviour_test_matrix)
 
 ## Field Type Validations (CRITICAL)
 
@@ -320,7 +320,7 @@ The task object below is what goes inside that `task` key.
 }
 ```
 
-`behaviour_test_matrix` and `technical_details` are both optional — see the Embedded Object Formats section below. Neither is one of the five review_queue-scored fields, so omitting either never produces an empty pill. The matrix above shows all **seven** fixed categories because that is the rule once the array is non-empty: an absent or empty matrix is fine, but a partial one is rejected.
+`technical_details` is optional. `behaviour_test_matrix` is optional only as far as the API is concerned: author it by default for any task with testable behaviour — see the Embedded Object Formats section below. Neither is one of the five review_queue-scored fields, so omitting either never produces an empty pill. The matrix above shows all **seven** fixed categories because that is the rule once the array is non-empty: an absent or empty matrix is fine, but a partial one is rejected.
 
 `created_by_agent` records **which agent created the task** so the `/agents` activity feed attributes the `created` row to that agent instead of an uninformative `?` avatar. Set it to **the plugin's own agent name — the exact same value you send as `agent_name` on claim and complete** (here, `"OpenCode"`). Use the plain agent name, never the `ai_agent:<model>` token form, so one agent stays one roster identity. `created_by_agent` is accepted **only on create** (`POST /api/tasks` and `POST /api/tasks/batch`); it is **forbidden on `PATCH`**, so it cannot be backfilled later — stamp it at creation time.
 
@@ -462,7 +462,7 @@ Use these exact values — any other value will be rejected.
 | `dependencies` | array | Task identifiers `["W45", "W46"]` | No |
 | `pitfalls` | array | Strings `["Don't do X", "Avoid Y"]` | No |
 | `technical_details` | object | Free-form JSON object of any additional technical info | No |
-| `behaviour_test_matrix` | array | Row objects: `category` (one of the 7 fixed categories), `behaviour`, `test_name`, `type` (`"unit"`/`"integration"`/`"manual"` or a `/`-joined combo), `status` (`"planned"`/`"passing"`/`"failing"`/`"not_applicable"`), `na_reason`, `position` | No (but if non-empty, all 7 categories must appear) |
+| `behaviour_test_matrix` | array | Row objects: `category` (one of the 7 fixed categories), `behaviour`, `test_name`, `type` (`"unit"`/`"integration"`/`"manual"` or a `/`-joined combo), `status` (`"planned"`/`"passing"`/`"failing"`/`"not_applicable"`), `na_reason`, `position` | No at the API — but authored by default for a task with testable behaviour; when non-empty, all 7 categories must appear |
 
 ## Embedded Object Formats — WRONG vs RIGHT
 
@@ -533,7 +533,15 @@ Use these exact values — any other value will be rejected.
 
 ### behaviour_test_matrix
 
-**Optional field.** Omit it entirely when you have nothing concrete to record — it is **not** one of the five review_queue-scored fields, so an absent matrix is never an empty pill. The rules below apply only once you do supply it.
+**Author it by default — a full seven-category matrix, never a partial one.** As soon as the task's `testing_strategy` lists a unit or integration test, include a `behaviour_test_matrix` with a row for every one of the seven fixed categories; each row either names a real test or is waived with an `na_reason`. This is the expected result, and it matches what `agents/task-enricher.md` already does in this port. A category that does not fit the change is a row to waive, not a reason to drop the whole field — and do not invent filler rows to fill a category out.
+
+**Manual-only strategies.** If `testing_strategy` carries nothing but `manual_tests`, ask whether those checks exercise behaviour this change adds or alters. If they do, author the matrix with `type: "manual"` rows whose `test_name` is one of the listed `manual_tests` entries. If they only proof-read documentation, copy or configuration, leave the matrix out and say why.
+
+**The one exception: no testable behaviour.** Leave the matrix out only when the task is a pure documentation, copy or configuration change, and record that choice in a single sentence of the task's `description` — for example, `No behaviour_test_matrix: configuration-only change, nothing testable.` A missing matrix with no stated reason looks like an oversight to whoever reads the task next.
+
+**The server's rules have not moved.** An absent or empty matrix is still accepted, and it never produces an empty pill, because it is **not** one of the five review_queue-scored fields. Authoring it by default is guidance for whoever writes the task, not a new API requirement. A partial matrix is still rejected with a 422 — so it is all seven categories or none.
+
+**Keep the matrix and `testing_strategy` in step.** Every non-waived row's `test_name` must name a test that `testing_strategy` lists; a waived row names no test and carries `na_reason` instead. When a row needs a test the strategy does not yet list, add that test to `testing_strategy` first. The matrix sits alongside `testing_strategy` and never replaces it — `testing_strategy` stays one of the five review_queue-scored fields.
 
 ```json
 ❌ WRONG (strings — must be row objects):
@@ -594,7 +602,7 @@ The excerpt above shows 3 rows to keep the shape readable. A real matrix also ca
 
 **`status` enum:** `"planned"`, `"passing"`, `"failing"`, `"not_applicable"` (default `"planned"`). Rows you author at **creation** time are `"planned"` — the implementing agent advances a row as the named test is written and run.
 
-**Shape:** an array of row objects, each pairing one behaviour the change must satisfy with the real test that covers it. Name a **real test** — the test file, or `path/to/test.exs — "test name"` for a test you plan to add. Prefer a test *name* over a bare `file:line`: at creation time the test does not exist yet, so a line number is invented and goes stale the moment anything is inserted above it. Otherwise explicitly waive the row with `na_reason` — never leave a row with neither. The field is optional at the API (absent, `null`, and `[]` all pass), but a **non-empty** matrix must include at least one row for **every** one of the 7 categories; a partial matrix is rejected with `must include at least one row for every category. Missing: <names>`. A malformed top-level value is rejected with `must be an array of objects with category, behaviour, test_name, type, status, and position fields`. Row text is stored and later rendered, so never record secrets or credentials in `behaviour`, `test_name`, or `na_reason` — nothing on the server strips them, so this rule is the only thing protecting them. Raw HTML is a separate matter with a real control behind it: every render path interpolates row text through auto-escaped HEEx and never a raw-HTML helper, and the API rejects an out-of-vocabulary `category` or `status` outright, so markup in a row renders as literal text rather than executing. Keep row text free of raw HTML anyway, as hygiene.
+**Shape:** an array of row objects, each pairing one behaviour the change must satisfy with the real test that covers it. Name a **real test** — the test file, or `path/to/test.exs — "test name"` for a test you plan to add. Prefer a test *name* over a bare `file:line`: at creation time the test does not exist yet, so a line number is invented and goes stale the moment anything is inserted above it. Otherwise explicitly waive the row with `na_reason` — never leave a row with neither. The field is optional at the API (absent, `null`, and `[]` all pass), but a **non-empty** matrix must include at least one row for **every** one of the 7 categories; a partial matrix is rejected with `must include at least one row for every category. Missing: <names>`. A malformed top-level value is rejected with `must be an array of objects with category, behaviour, test_name, type, status, and position fields`. Row text is stored and later rendered, so never record secrets, tokens or credentials in `behaviour`, `test_name`, or `na_reason`, and never name the place one is kept — nothing on the server strips them, so this rule is the only thing protecting them. Raw HTML is a separate matter with a real control behind it: every render path interpolates row text through auto-escaped HEEx and never a raw-HTML helper, and the API rejects an out-of-vocabulary `category` or `status` outright, so markup in a row renders as literal text rather than executing. Keep row text free of raw HTML anyway, as hygiene.
 
 ### security_considerations
 
