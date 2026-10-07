@@ -24,6 +24,46 @@ Why accepted rather than backfilled:
 
 The audit also found **zero** GitHub releases without a matching tag, so the record is incomplete in only this one direction.
 
+## [1.41.0] - 2026-10-07
+
+This release finishes the port of stride's G446–G448 fixes, which 1.40.0 began, and records below what this port cannot carry. It also ships four changes from the port of stride's G455 rework gates (W2311–W2314), because they were committed after 1.40.0 and before this release; the rest of that port will follow in a later release.
+
+### Changed — discovery asks for the slim `next` reply, and the task body comes from the claim (W2305)
+
+Step 1 of `stride-workflow` now calls `GET /api/tasks/next` for the slim summary and takes only the identifier. Step 2 reads the full task from the claim reply and runs the enrichment check there, before any work. A task enriched after its claim goes to the explorer and reviewer inline, because `.stride/.task-<IDENTIFIER>.json` is written at the claim and predates the PATCH. The claiming skill's manual-hooks path runs `before_doing` before the claim, so it fetches `GET /api/tasks/:id` after slim discovery. `nextClaimableIdentifier` in `src/advisory-continuation.ts` asks for the slim view too; it reads only the status and `data.identifier`, so an older server's full reply still works. `src/slim-discovery.test.ts` pins the `next` calls in the shipped text and the new order. Port of stride W2256.
+
+### Changed — rationale moves out of the `stride-workflow` skill into `docs/orchestrator-rationale.md` (W2306)
+
+Background the agent re-read on every task — the origin story, the D221 trigger history, why Step 0 carries the `.gitignore` notice, why the review cap has no mechanical check, the `after_goal` detection layers and the measurements behind the `dispatch_count` limits, among others — now lives in a new `docs/orchestrator-rationale.md`, one section per moved block. Each moved block leaves a one-sentence pointer naming the doc by path. Every rule, gate, matrix, decision summary, schema, self-check and snippet stays inline, and the canon-governed text is unchanged. That commit took `SKILL.md` from 151,119 to 143,035 bytes; W2305, W2311 and W2313 add to the same file, so it ships at 156,058 bytes, against 149,398 in 1.40.0. `src/workflow-rationale.test.ts` checks that every pointer names a real section, that every section is pointed at, and that the inline rules remain. Port of stride W2257.
+
+### Changed — rationale moves out of the completing-tasks skill and the task-reviewer into `docs/` (W2307)
+
+Background and history leave `skills/stride-completing-tasks/SKILL.md` for a new `docs/completion-rationale.md`, and the reviewer's history notes leave `agents/task-reviewer.md` for a new `docs/task-reviewer-rationale.md`, each with a one-line pointer. Sections that only restated the skill were deleted rather than moved: the completion flowchart, the plugin half of Hook Execution Pattern, Red Flags, the Rationalization Table, Common Mistakes, Implementation Workflow and the Quick Reference Card. The one rule found only in the flowchart, that a failed `after_review` leaves the task complete, moved into the `needs_review=false` list. The field reference, both result shapes, the skip-reason enum, the self-check, the reviewer's schema and both canon-governed blocks stay inline. `src/completion-rationale.test.ts` pins the pointers in both directions and the canon blocks by hash. Port of stride W2258.
+
+### Added — the task-explorer reports task statements the current code contradicts (W2311)
+
+The explorer gains a step that checks what the task says about the code as it stands — from the `key_files` notes, `description`, `where_context`, `patterns_to_follow` and `technical_details` — and opens its summary with "Task statements the current code contradicts". The explorer has no shell, so Step 3 Branch C runs the `git -C` commit window itself and passes in positions, short hashes and dates, never commit messages, using plain repo-relative paths only. `src/commit-window.test.ts` runs that snippet against a nested fixture repository. Port of stride W2298.
+
+### Added — the task-reviewer traces each testing-strategy item to a named test (W2312)
+
+Review step 4 traces each `unit_tests`, `integration_tests` and `edge_cases` entry to a test whose assertions check it, cited by `file:line`. An untraced entry is an Important testing issue. `manual_tests` are left out with a one-line note. The JSON block's keys and `schema_version` are unchanged. Port of stride W2293.
+
+### Added — break-it evidence for new and changed tests (W2313)
+
+For each test a diff adds or changes, Step 4 of `stride-workflow` now has the implementer break the behaviour it guards, see it fail, reverse the edit and see it pass. A content-hashing snapshot of the tree, which also hashes the staged diff, must match before the reviewer runs and before any commit or hook. Step 4 also says what the snapshot cannot see — a permission-only leftover on an untracked file, or on any file when `core.fileMode` is false — and has the implementer confirm a mode-bit break's reversal with `ls -l`. Step 6 passes the entries to the reviewer as a labelled prose block, and the reviewer raises an Important testing issue for a missing or unconvincing one. No JSON block key is added and `schema_version` stays 1.7. `src/break-it-rules.test.ts` pins the edge cases. Port of stride W2294.
+
+### Added — the task-reviewer checks the factual statements a diff adds (W2314)
+
+Review step 6 gains a Statement Verification block: the reviewer collects each checkable statement the diff adds, checks it with a read-only command on tracked files, and gives the command and its result before the JSON block. A contradicted statement is an Important issue and never cosmetic. The block's keys and `schema_version` are unchanged. Stride's claims-census hand-off is not ported, because this port has no claims census. Port of stride W2295.
+
+### Not ported from G446–G448 — recorded so "not applicable" is not mistaken for "missed"
+
+- **W2250, dispatcher mode by default — not applicable.** This port has no task-runner agent to dispatch, so there is no dispatcher mode to make the default.
+- **W2255, the Stop gate permits while a stride subagent runs — not applicable.** This port has no blocking Stop gate. Its advisory continuation (`src/advisory-continuation.ts`) can start a new turn that names the next task, but it cannot refuse or delay a stop, so there is nothing to relax.
+- **W2254, reading key files while the explorer runs — not ported.** OpenCode's task tool returns only when the subagent finishes, so there is nothing to overlap. 1.40.0 recorded this under W2304.
+- **W2252, review round two must be earned — followed, not enforced.** This port has no review-round predicate in its markdown, so the round-two triggers are prose the agent follows, not a check that refuses. 1.40.0 shipped the rule under W2303.
+- **W2259, the token and wall-clock measurement — not ported, and no saving is claimed.** Stride measured its own plugin on Claude Code only. Nothing here was measured on OpenCode, so this release claims no token or time saving.
+
 ## [1.40.0] - 2026-10-05
 
 ### Added — the claimed task is saved to `.stride/.task-<IDENTIFIER>.json` (W2300)
