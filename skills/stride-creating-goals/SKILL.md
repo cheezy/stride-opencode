@@ -255,6 +255,8 @@ When depending on EXISTING tasks already in the system:
 - Include patterns_to_follow and pitfalls
 - Provide security_considerations as an array of strings
 
+**Cross-field consistency pass.** When you author nested tasks directly instead of through `agents/task-decomposer.md`, each one is owed the six field-against-field checks that agent applies to every child before handing it back. Run them on every nested task, as Step 7 of `agents/task-decomposer.md` lays them out, before you submit the batch.
+
 **The five review_queue-scored fields are the minimum bar for every nested task:**
 
 - `acceptance_criteria` — newline-separated string; the implementing agent's definition of done. **Blank → empty pill on the review_queue.**
