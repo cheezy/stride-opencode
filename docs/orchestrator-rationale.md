@@ -189,7 +189,9 @@ gate runs. That timing is why the rule is required and not just good practice.
 
 ## Why completion_summary Carries the After-Review Line
 
-Pointer site: Step 6.6, files written after review.
+Pointer sites: Step 6.6, files written after review; and the paragraph on
+checks that entered the test tree, under Recording hardened checks in
+`skills/stride-completing-tasks/SKILL.md`.
 
 This does not add a new place to record exploratory findings, which still go
 only to `completion_notes` and the reviewer's `testing_strategy` note.
