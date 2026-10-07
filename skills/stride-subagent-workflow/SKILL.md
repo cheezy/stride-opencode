@@ -152,11 +152,13 @@ The decomposer will return an ordered list of child tasks with:
 
 Without a match — no file, another task's file, an unusable identifier, an explorer reply that opens with a `task_file:` line, or a task enriched after its claim, whose saved copy predates the `PATCH` — provide the agent with these fields inline instead:
 - The task's `key_files` array (file paths and notes)
+- The task's `description` text
 - The task's `patterns_to_follow` text
 - The task's `where_context` text
+- The task's `technical_details` object, when it has one
 - The task's `testing_strategy` object
 
-The explorer will return a structured summary of: each key file's current state, related test files, existing patterns found, and module APIs to reuse.
+The explorer will return a structured summary that opens with `Task statements the current code contradicts`: the task's claims about the code that no longer hold, each with how it was checked, then a `commit window:` line and the claims it could not check (`none found` when nothing is contradicted). After that come each key file's current state, related test files, existing patterns found, and module APIs to reuse. The window lines travel with the invocation as `stride-workflow` Step 3 Branch C computes them; this phase does not restate how.
 
 **This invocation blocks:** OpenCode's `task` tool (opencode 1.16.2) returns only after the explorer has finished, so there is nothing to overlap — no reading or drafting happens while it runs. Background subagents are an experimental opt-in this workflow does not use; `stride-workflow` Step 3 Branch C names the source and the reason.
 
