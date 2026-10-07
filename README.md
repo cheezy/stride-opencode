@@ -216,7 +216,7 @@ The `stride-creating-tasks`, `stride-enriching-tasks`, and `stride-workflow` ski
 | Agent | Mode | Purpose |
 |-------|------|---------|
 | `task-explorer` | subagent | Explore key_files and patterns before implementation |
-| `task-enricher` | subagent | Enrich a sparse task before claiming |
+| `task-enricher` | subagent | Enrich a sparse task after claiming, before work starts |
 | `task-reviewer` | subagent | Review changes against acceptance criteria before completion |
 | `task-decomposer` | subagent | Break goals into dependency-ordered child tasks |
 | `hook-diagnostician` | subagent | Diagnose hook failures with prioritized fix plans |
@@ -338,7 +338,7 @@ So when enabled this **starts a new turn**; it does not stop an old one from end
 - its `session_id` is a real id (never the `unknown` sentinel) and equals the idle event's session,
 - its `completed_at` is within the last **15 minutes** and not in the future,
 - the injection budget for this session and this completion is not spent,
-- `GET /api/tasks/next` returns an identifier-shaped identifier.
+- `GET /api/tasks/next?response_view=slim` returns an identifier-shaped identifier (the slim summary is enough, and an older server that answers with the full task works the same way).
 
 **Bounds.** The counter lives at `.stride/.opencode-advisory-continuations`, is keyed on `<session id>:<completed identifier>`, and defaults to **one** injection per unfollowed completion per session — one, not the Pi port's two, because here each injection *is* a whole turn rather than a note attached to one you were having anyway. Override with `STRIDE_OPENCODE_ADVISORY_MAX`, unsigned decimal only; anything else is ignored and the default stands. The counter is written *before* the prompt is sent, because a re-prompt starts a turn that will itself go idle — an injection the plugin cannot count is one it cannot bound. It is reset on the next claim, and when the record is absent or says a review is owed.
 

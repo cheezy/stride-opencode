@@ -18,7 +18,7 @@ Before ANY Stride API call, activate the corresponding skill. These skills conta
 Five custom agents are available for task lifecycle support. Use them per the decision matrix in `stride-subagent-workflow`:
 
 - **task-explorer** — Explore key_files and patterns before coding (medium+ complexity or 2+ key_files)
-- **task-enricher** — Enrich a sparse task before claiming (discovers key_files, patterns, testing_strategy, and verification_steps)
+- **task-enricher** — Enrich a sparse task after claiming, before work starts (discovers key_files, patterns, testing_strategy, and verification_steps)
 - **task-reviewer** — Review changes against acceptance criteria before completion (medium+ complexity or 2+ key_files)
 - **task-decomposer** — Break goals into dependency-ordered child tasks
 - **hook-diagnostician** — Diagnose hook failures with prioritized fix plans

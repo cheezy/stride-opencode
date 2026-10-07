@@ -29,6 +29,7 @@ import {
   advisoryMaxInjections,
   counterKey,
   decideAdvisoryContinuation,
+  nextClaimableIdentifier,
   readInjectionCount,
 } from "./advisory-continuation";
 
@@ -176,7 +177,7 @@ describe("work-remains is determined from the API, not the event payload", () =>
       expect(decision.identifier).toBe("W9999");
       expect(decision.text).toContain("W9999");
       expect(decision.text).not.toContain("W2150");
-      expect(calls.some((u) => u.endsWith("/api/tasks/next"))).toBe(true);
+      expect(calls.some((u) => u.endsWith("/api/tasks/next?response_view=slim"))).toBe(true);
     }),
   );
 
@@ -211,6 +212,80 @@ describe("work-remains is determined from the API, not the event payload", () =>
       expect(decision).toEqual({ inject: false, reason: "identifier_not_shaped" });
       expect(JSON.stringify(decision)).not.toContain("delete");
       expect(existsSync(join(dir, ADVISORY_COUNTER_FILE))).toBe(false);
+    }),
+  );
+});
+
+// (W2305) Discovery asks for the slim view. The advisory reads only the status
+// and data.identifier, so the summary is enough, and an older server that
+// ignores the parameter and sends the whole task must keep working.
+const SLIM_NEXT_BODY = {
+  data: {
+    id: 7001,
+    identifier: "W2153",
+    title: "a task title",
+    type: "work",
+    status: "open",
+    priority: "medium",
+    complexity: "small",
+    dependencies: [],
+    created_by_agent: null,
+    parent_id: null,
+    claim_expires_at: null,
+  },
+};
+
+const FULL_NEXT_BODY = {
+  data: {
+    ...SLIM_NEXT_BODY.data,
+    description: "a full task body from a server without the slim view",
+    acceptance_criteria: "one\ntwo",
+    key_files: [{ file_path: "src/a.ts", note: "n", position: 0 }],
+    testing_strategy: { unit_tests: ["t"] },
+    verification_steps: [],
+  },
+};
+
+describe("the next call asks for the slim view", () => {
+  it("requests response_view=slim", async () => {
+    const stub = stubFetch(SLIM_NEXT_BODY);
+    await nextClaimableIdentifier({
+      fetch: stub.fn,
+      apiBase: "http://localhost:4000",
+      token: FAKE_TOKEN,
+    });
+    expect(stub.calls).toEqual(["http://localhost:4000/api/tasks/next?response_view=slim"]);
+    expect(stub.calls[0]).not.toContain(FAKE_TOKEN);
+  });
+
+  it("reads the identifier from a slim next response", async () => {
+    const stub = stubFetch(SLIM_NEXT_BODY);
+    const result = await nextClaimableIdentifier({
+      fetch: stub.fn,
+      apiBase: "http://localhost:4000",
+      token: FAKE_TOKEN,
+    });
+    expect(result).toEqual({ ok: true, identifier: "W2153" });
+  });
+
+  it("accepts a full-body next response", async () => {
+    const stub = stubFetch(FULL_NEXT_BODY);
+    const result = await nextClaimableIdentifier({
+      fetch: stub.fn,
+      apiBase: "http://localhost:4000",
+      token: FAKE_TOKEN,
+    });
+    expect(result).toEqual({ ok: true, identifier: "W2153" });
+  });
+
+  it(
+    "calls the slim next endpoint",
+    withProject(async (dir) => {
+      writeRecord(dir);
+      const { decision, calls } = await decide(dir, { fetchStub: stubFetch(SLIM_NEXT_BODY) });
+      expect(decision.inject).toBe(true);
+      expect(calls).toHaveLength(1);
+      expect(calls[0]?.endsWith("/api/tasks/next?response_view=slim")).toBe(true);
     }),
   );
 });

@@ -147,18 +147,18 @@ Before claiming any task, verify these files exist:
 ### With Plugin Installed (Automatic Hooks)
 
 1. **Verify prerequisites** - Check .stride_auth.md and .stride.md exist
-2. **Find available task** - Call `GET /api/tasks/next`
-3. **Review task details** - Read description, acceptance criteria, key files
-4. **Check task completeness** - If key_files is empty OR testing_strategy is missing OR verification_steps is empty, activate stride-enriching-tasks
-5. **Call `POST /api/tasks/claim` directly** - Include `before_doing_result` with `{"exit_code": 0, "output": "Executed by OpenCode hooks system", "duration_ms": 0}`. The hooks.json `tool.execute.after` hook will automatically execute `.stride.md` `## before_doing` commands after the claim succeeds.
-6. **If the automatic hook fails:** Fix the issue and retry.
-7. **Task claimed?** BEGIN IMPLEMENTATION IMMEDIATELY
+2. **Find available task** - Call `GET /api/tasks/next?response_view=slim`. The reply is a summary (identifier, title, type, priority, complexity, dependencies), not the task body; a server without the slim view returns the full task, and that works too. Keep the identifier.
+3. **Call `POST /api/tasks/claim` directly** - Include `before_doing_result` with `{"exit_code": 0, "output": "Executed by OpenCode hooks system", "duration_ms": 0}`. The hooks.json `tool.execute.after` hook will automatically execute `.stride.md` `## before_doing` commands after the claim succeeds.
+4. **If the automatic hook fails:** Fix the issue and retry.
+5. **Review task details** - The claim reply carries the full task: read description, acceptance criteria, key files
+6. **Check task completeness** - If key_files is empty OR testing_strategy is missing OR verification_steps is empty, activate stride-enriching-tasks and PATCH the result before any work (see Enrichment Check below)
+7. **Task ready?** BEGIN IMPLEMENTATION IMMEDIATELY
 
 ### Without Plugin (Manual Hooks)
 
 1. **Verify prerequisites** - Check .stride_auth.md and .stride.md exist
-2. **Find available task** - Call `GET /api/tasks/next`
-3. **Review task details** - Read description, acceptance criteria, key files
+2. **Find available task** - Call `GET /api/tasks/next?response_view=slim`, then `GET /api/tasks/<identifier>` to get the whole task. This path executes `before_doing` ahead of the claim, which leaves the claim reply arriving too late to review or enrich from.
+3. **Review task details** - Read description, acceptance criteria, key files from that body
 4. **Check task completeness** - If key_files is empty OR testing_strategy is missing OR verification_steps is empty, activate stride-enriching-tasks
 5. **Read .stride.md before_doing section** - Get the setup command
 6. **Execute before_doing hook** (blocking, 60s timeout) — Execute each line one at a time, NO permission prompts
@@ -172,20 +172,22 @@ Before claiming any task, verify these files exist:
 ### With Plugin (Automatic Hooks)
 
 ```
-Prerequisites Check → Call GET /api/tasks/next → Review task
+Prerequisites Check → Call GET /api/tasks/next?response_view=slim (summary)
     ↓
 Call POST /api/tasks/claim directly
 (hooks.json tool.execute.after auto-executes before_doing)
     ↓
 Automatic hook failed? ─YES→ Fix Issues → Retry claim
     ↓ NO
+Review the full task in the claim reply → Sparse? ─YES→ Enrich, PATCH
+    ↓
 BEGIN IMPLEMENTATION IMMEDIATELY
 ```
 
 ### Without Plugin (Manual Hooks)
 
 ```
-Prerequisites Check → Call GET /api/tasks/next → Review task
+Prerequisites Check → GET /api/tasks/next?response_view=slim → GET /api/tasks/:id → Review task
     ↓
 Read .stride.md before_doing section
     ↓
@@ -200,7 +202,7 @@ BEGIN IMPLEMENTATION IMMEDIATELY
 
 ## Enrichment Check (Optional)
 
-After reviewing task details, check if the task has sufficient specification for implementation. **Well-specified tasks skip this step entirely.**
+Once you hold the full task — the claim reply with the plugin, the `GET /api/tasks/:id` body without it — check whether it is specified well enough to implement. The slim discovery summary cannot answer this: it has none of the fields below. **Well-specified tasks skip this step entirely.**
 
 **Activate stride-enriching-tasks if ANY of these are true:**
 - `key_files` is empty or missing
@@ -219,9 +221,9 @@ After reviewing task details, check if the task has sufficient specification for
 1. Activate the `stride-enriching-tasks` skill with the task's title and description
 2. The skill will explore the codebase and populate missing fields
 3. Use `PATCH /api/tasks/:id` to update the task with enriched fields
-4. Continue with the claiming process (before_doing hook)
+4. With the plugin, start work; without it, continue to the before_doing hook and the claim
 
-**Important:** Enrichment happens BEFORE the before_doing hook, not after. The enriched fields help the agent understand the task scope before starting work.
+**Important:** Enrichment always comes before any work, and where it sits relative to the hook depends on the path. With the plugin it comes after the claim and its automatic before_doing, since the claim reply is where the body arrives. Without the plugin it comes before before_doing, because on that path the hook runs ahead of the claim. Either way the enriched fields shape your understanding of the task before you start.
 
 ## Hook Execution Pattern
 
@@ -454,7 +456,7 @@ staleness nudge can never fire for you.
 ## Implementation Workflow
 
 1. **Verify prerequisites** - Ensure auth and hooks files exist
-2. **Get next task** - Call GET /api/tasks/next
+2. **Get next task** - Call GET /api/tasks/next?response_view=slim, then GET /api/tasks/:id to get the whole task (this listing runs before_doing ahead of the claim)
 3. **Review task** - Read all task details thoroughly
 4. **Check task completeness** - If key_files/testing_strategy/verification_steps missing, activate stride-enriching-tasks
 5. **Execute before_doing hook** - Run setup with timeout
@@ -469,19 +471,22 @@ staleness nudge can never fire for you.
 ```
 WITH PLUGIN (automatic hooks):
 ├─ 1. Verify .stride_auth.md and .stride.md exist ✓
-├─ 2. Call GET /api/tasks/next ✓
-├─ 3. Review task details ✓
-├─ 4. Check completeness → if minimal, activate stride-enriching-tasks ✓
-├─ 5. Call POST /api/tasks/claim directly ✓
+├─ 2. Call GET /api/tasks/next?response_view=slim (summary only) ✓
+├─ 3. Call POST /api/tasks/claim directly ✓
 │     (hooks.json tool.execute.after auto-executes before_doing via stride-hook.sh)
-├─ 6. Automatic hook failed? → Fix issues, retry claim ✓
-└─ 7. Task claimed? → BEGIN IMPLEMENTATION IMMEDIATELY ✓
+├─ 4. Automatic hook failed? → Fix issues, retry claim ✓
+├─ 5. Review the full task in the claim reply ✓
+├─ 6. Check completeness → if minimal, activate stride-enriching-tasks ✓
+└─ 7. Task ready? → BEGIN IMPLEMENTATION IMMEDIATELY ✓
 
 🚨 DO NOT manually execute .stride.md commands when plugin is installed
 🚨 JUST make the API call — hooks.json handles everything
 
 WITHOUT PLUGIN (manual hooks):
-├─ 1-4. Same as above ✓
+├─ 1. Verify .stride_auth.md and .stride.md exist ✓
+├─ 2. Call GET /api/tasks/next?response_view=slim, then GET /api/tasks/:id ✓
+├─ 3. Review task details from that body ✓
+├─ 4. Check completeness → if minimal, activate stride-enriching-tasks ✓
 ├─ 5. Read before_doing hook from .stride.md ✓
 ├─ 6. Execute before_doing (60s timeout, blocking) ✓
 ├─ 7. Hook succeeds? → Call POST /api/tasks/claim WITH result ✓

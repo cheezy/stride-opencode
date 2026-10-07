@@ -273,7 +273,15 @@ export function advisoryMessageText(identifier: string, max: number): string {
   );
 }
 
-/** The one place the Stride API is touched. The token reaches only a header. */
+/**
+ * The one place the Stride API is touched. The token reaches only a header.
+ *
+ * The request asks for the slim view of `next`: this function looks at nothing
+ * but the status code and `data.identifier`, and the slim summary carries that
+ * field without the rest of the task body. A server that predates the view
+ * ignores the query parameter and answers with the whole task, which still has
+ * `data.identifier` in the same place, so both replies take the same path.
+ */
 export async function nextClaimableIdentifier(opts: {
   fetch: typeof globalThis.fetch;
   apiBase: string;
@@ -293,7 +301,7 @@ export async function nextClaimableIdentifier(opts: {
   const { fetch, apiBase, token, signal } = opts;
   let response: Response;
   try {
-    response = await fetch(`${apiBase}/api/tasks/next`, {
+    response = await fetch(`${apiBase}/api/tasks/next?response_view=slim`, {
       method: "GET",
       headers: { Authorization: `Bearer ${token}`, Accept: "application/json" },
       signal,
